@@ -1367,6 +1367,7 @@ const I18N = {
   repMonthlyTargetAch: { en: "📆 Monthly Target & Achievement", ta: "📆 மாதாந்திர இலக்கு & சாதனை" },
   repStaffAppraisal: { en: "⭐ Staff Appraisal", ta: "⭐ பணியாளர் மதிப்பீடு" },
   repApprovalRegister: { en: "✅ Approval / Working Register", ta: "✅ ஒப்புதல் / பணி பதிவேடு" },
+  repHrAppraisalStaffWise: { en: "🎖️ HR Appraisal (Staff-wise)", ta: "🎖️ HR மதிப்பீடு (பணியாளர் வாரியாக)" },
   colMonthlyTarget: { en: "Monthly Target", ta: "மாதாந்திர இலக்கு" },
   colApprovedActual: { en: "Approved Actual", ta: "ஒப்புதல் உண்மையானது" },
   colBalance: { en: "Balance", ta: "மீதம்" },
@@ -3923,6 +3924,26 @@ const REPORT_DEFS = {
       { key: 'submittedOn', labelKey: 'colSubmittedOn', fmt: 'date' }, { key: 'approvedOn', labelKey: 'colApprovedOn', fmt: 'date' },
       { key: 'approvedBy', labelKey: 'colApprovedBy' }, { key: 'rejectionReason', labelKey: 'colRejectionReason' }
     ], totals: []
+  },
+  // STAFF-WISE HR APPRAISAL REPORT (Aug 2026): reuses the existing
+  // getFullAppraisal action (same data source as the HR Appraisal ->
+  // Scorecard sub-tab) so this can't drift out of sync with the real HR
+  // Final Score formula - no backend change needed. isHrAppraisal:true
+  // tells runReport() to also send a periodLabel derived from the From
+  // date's month (HR Appraisal periods are monthly, e.g. "Aug-2026"), the
+  // same convention used everywhere else in the app. Server-side auth is
+  // already handled: getFullAppraisal reads the trusted session role, and
+  // this Reports view itself is Manager-only in the nav.
+  hrAppraisalStaffWise: {
+    action: 'getFullAppraisal', labelKey: 'repHrAppraisalStaffWise', filters: ['date', 'staff'], isHrAppraisal: true,
+    columns: [
+      { key: 'staffId', labelKey: 'colStaffId' }, { key: 'staffName', labelKey: 'employee' },
+      { key: 'department', labelKey: 'section' }, { key: 'designation', labelKey: 'colDesignation' },
+      { key: 'hrScore', labelKey: 'hr100Col', fmt: 'num' }, { key: 'bonusMarks', labelKey: 'bonus', fmt: 'num' },
+      { key: 'memoDeduction', labelKey: 'memo', fmt: 'num' }, { key: 'hrFinalScore', labelKey: 'hrFinalCol', fmt: 'num' },
+      { key: 'storesKpiPct', labelKey: 'storesPctCol', fmt: 'pct' }, { key: 'combinedFinalScore', labelKey: 'final', fmt: 'num' },
+      { key: 'grade', labelKey: 'gradeCol' }, { key: 'finalRating', labelKey: 'rating', fmt: 'badge' }
+    ], totals: ['bonusMarks', 'memoDeduction']
   }
 };
 
@@ -4002,6 +4023,12 @@ async function runReport() {
   if (def.filters.includes('activity')) params.activityId = document.getElementById('repActivity').value || undefined;
   if (def.filters.includes('workflow')) params.workflowId = document.getElementById('repWorkflow').value || undefined;
   if (def.filters.includes('status')) params.status = document.getElementById('repStatus').value || undefined;
+  // HR Appraisal periods are monthly - derive periodLabel ("Aug-2026") from
+  // the From date's month, same convention as the HR Appraisal tab's own
+  // Period Label field. If From/To span more than one calendar month, the
+  // report still runs for the From month's period (matches how HR Appraisal
+  // is run everywhere else in the app - one period at a time).
+  if (def.isHrAppraisal) params.periodLabel = defaultPeriodLabel(new Date(from));
 
   const tbody = document.querySelector('#reportTable tbody');
   document.querySelector('#reportTable thead tr').innerHTML = def.columns.map(c => `<th>${T(c.labelKey)}</th>`).join('');
