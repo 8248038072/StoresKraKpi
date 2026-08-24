@@ -5205,7 +5205,23 @@ function computeStoresKPIPct(staffId, from, to) {
   // "possible += g.weightagePct" accumulation, which only counted
   // Workflows the staff already had an Approved entry for.
   const possible = computeStaffFixedActiveWorkflowMaxScore_(staffId, workflows);
-  return possible > 0 ? Math.round((earned / possible) * 10000) / 100 : 0;
+  const pctRaw = possible > 0 ? (earned / possible) * 100 : 0;
+  // CAP AT 100 (Aug 2026 fix): 'earned' is built from each Register row's
+  // FROZEN historical Weightage % (Historical Freeze policy), while
+  // 'possible' is the CURRENT/live sum of Weightage % across today's
+  // Active workflows (computeStaffFixedActiveWorkflowMaxScore_). If a
+  // Workflow's Weightage % was reduced after entries were Approved, or a
+  // Workflow was made Inactive after a staff already earned Approved score
+  // under it, 'earned' can legitimately exceed 'possible' and pctRaw can
+  // exceed 100 - which then pushed Combined Final Score (Stores KPI% x 70%
+  // + HR Score x 30%) out of its documented 0-100 range (see Formula
+  // Validation test harness: "Combined Score Range"). HR_APPRAISAL_POLICY
+  // already states no-overachievement-credit as company policy
+  // (MAX_ACHIEVEMENT_PCT_FOR_SCORING = 100, applied per-KPI in
+  // computeKpiScore) - this mirrors the same 0-100 clamp already applied to
+  // hrFinalScore, so Stores KPI % (and therefore Combined Final Score) can
+  // never leave 0-100 regardless of Master Data edits made after the fact.
+  return Math.round(clamp(pctRaw, 0, 100) * 100) / 100;
 }
 
 // ============================================================
