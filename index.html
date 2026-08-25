@@ -1542,7 +1542,19 @@ function hasTeamWorkflows(activityId) {
 /* ============================================================
    API WRAPPER
    ============================================================ */
-async function callApi(action, params) {
+// BUGFIX (post-live, mirrors the Sidebar's session-race fix): loadDashboard()/
+// enterApp() fire several callApi() calls in parallel right after login, each
+// hitting the deployed web app as its own separate Apps Script execution.
+// CacheService.put()/get() (used by createSession()/resolveSession() in
+// Code.gs) can have a brief propagation lag between concurrent executions on
+// different backend instances, so one of these calls can occasionally miss
+// seeing the token login *just* wrote and come back with sessionExpired:true
+// even though the session is perfectly valid - producing exactly one
+// "Session expired" toast right after login while the rest of the dashboard
+// loads and renders normally. Fix: retry a sessionExpired failure once after
+// a short delay before treating it as real; only a call that fails twice in
+// a row (or a genuinely stale/idle-timed-out session) actually logs out.
+async function callApi(action, params, _retried) {
   if (!API_URL || API_URL.indexOf('PASTE_') === 0) {
     throw new Error('Backend not connected yet. Deploy code.gs and set API_URL (see SETUP.md).');
   }
@@ -1562,6 +1574,10 @@ async function callApi(action, params) {
   const out = await res.json();
   if (!out.ok) {
     if (out.sessionExpired) {
+      if (!_retried && action !== 'login') {
+        await new Promise(r => setTimeout(r, 500));
+        return callApi(action, params, true);
+      }
       logout();
       throw new Error('Your session expired. Please log in again.');
     }
