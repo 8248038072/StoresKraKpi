@@ -550,19 +550,41 @@ function ui_logout(token) {
   return { success: true };
 }
 
-function ui_getStaffList() {
+// SIDEBAR AUTH FIX (post-live audit): these five reference-data getters
+// used to take no token and never called resolveUiActor_(), unlike every
+// other read path in the system (the JSON API requires a valid session for
+// every action except login, and every other ui_* wrapper below already
+// resolves+verifies a token). ui_getStaffList() in particular returned the
+// full active staff roster (name/ID/designation) to any caller able to
+// invoke google.script.run against this sidebar, logged in or not - a
+// real inconsistency with the app's zero-trust pattern even though actually
+// reaching the sidebar already requires Sheet access. Each now requires
+// params.token and resolves it the same way resolveUiActor_() does,
+// throwing before any data is returned if the session is missing/expired.
+function requireUiSession_(token) {
+  const session = resolveSession(token);
+  if (!session) {
+    throw new Error('Session expired. Please log in again.');
+  }
+  return session;
+}
+
+function ui_getStaffList(params) {
+  requireUiSession_(params && params.token);
   return readAll(SHEETS.STAFF).filter(s => s['Status'] === 'Active')
     .map(s => ({ staffId: s['Staff ID'], staffName: s['Staff Name'], designation: s['Designation'] }));
 }
 
-function ui_getRecognitionTypes() {
+function ui_getRecognitionTypes(params) {
+  requireUiSession_(params && params.token);
   return Object.keys(HR_POLICY.RECOGNITION_BONUS).map(type => ({
     type: type, bonus: HR_POLICY.RECOGNITION_BONUS[type],
     isRange: type === 'Special Appreciation', range: HR_POLICY.SPECIAL_APPRECIATION_RANGE
   }));
 }
 
-function ui_getMemoTypes() {
+function ui_getMemoTypes(params) {
+  requireUiSession_(params && params.token);
   return Object.keys(HR_POLICY.MEMO_DEDUCTION).map(type => ({ type: type, deduction: HR_POLICY.MEMO_DEDUCTION[type] }));
 }
 
@@ -571,10 +593,16 @@ function ui_getMemoTypes() {
 // CATEGORIES - previously the Sidebar had no getter for this and kept a
 // manually-synced duplicate list with a comment asking whoever edits
 // HR_POLICY to remember to edit the Sidebar too.
-function ui_getMemoCategories() {
+function ui_getMemoCategories(params) {
+  requireUiSession_(params && params.token);
   return HR_POLICY.MEMO_CATEGORIES.slice();
 }
 
+// NOT session-gated on purpose: called from the Sidebar's window.onload,
+// before login, to prefill the Period Label field on the login screen
+// itself. It returns nothing but the current calendar month/year string -
+// no staff or business data - so gating it would break that pre-login
+// prefill for no security benefit.
 function ui_currentMonthLabel() {
   return currentMonthLabel();
 }
@@ -1883,7 +1911,17 @@ const api = {
   },
 
   // ---------- MASTERS (read) ----------
-  getMasters: function () {
+  // LIVE BUG FIX (post single-source-of-truth refactor): this used to take
+  // no parameter at all, so the two calls below to ui_getRecognitionTypes()/
+  // ui_getMemoTypes() ran with no token even though handle() always calls
+  // api[action](params) with the caller's real params (including token).
+  // Since those two getters were hardened earlier to require a valid
+  // session via requireUiSession_(), calling them with no token made them
+  // throw "Session expired" on every single call - and because index.html
+  // calls getMasters() immediately after login, this broke the dashboard
+  // load for every role, every time, regardless of session validity. Now
+  // accepts p and forwards it so the real session token reaches both calls.
+  getMasters: function (p) {
     return {
       company: readAll(SHEETS.COMPANY),
       sections: readAll(SHEETS.SECTION),
@@ -1897,8 +1935,8 @@ const api = {
       // stop matching what the dropdowns showed. index.html now reads these
       // three lists from here (see ui_getRecognitionTypes/ui_getMemoTypes,
       // reused below) instead of keeping its own copy.
-      recognitionTypes: ui_getRecognitionTypes(),
-      memoTypes: ui_getMemoTypes(),
+      recognitionTypes: ui_getRecognitionTypes(p),
+      memoTypes: ui_getMemoTypes(p),
       memoCategories: HR_POLICY.MEMO_CATEGORIES.slice(),
       memoDecisionOptions: HR_POLICY.MEMO_DECISION_OPTIONS.slice(),
       // SINGLE SOURCE OF TRUTH: TEAM_WORKFLOW_IDS used to also be hardcoded
@@ -6104,17 +6142,50 @@ function migrateHRAppraisalV2() {
 // run this once to seed a starter HR login, or (b) manually add a Role='HR'
 // row to the Users sheet / change an existing user's Role to 'HR'. Safe to
 // re-run - skips if a Role='HR' user already exists.
+// LIVE AUDIT FIX (P1, security): this used to append 'hr1' with a plaintext
+// 'Password' column and no 'Must Change Password' flag - unlike seedUsers()
+// above, which hashes the same default password with a fresh salt and
+// forces a change on first login. On any spreadsheet that predates the HR
+// role (i.e. every one where this migration actually runs), that left a
+// permanent, never-rotated, plaintext 'ChangeMe@123' credential on an HR
+// account with write access to Memo/Disciplinary/Appraisal data. Now seeds
+// the row the same hashed + forced-change way seedUsers() does.
 function migrateAddHRRole() {
   const users = readAll(SHEETS.USERS);
   if (users.some(u => u['Role'] === 'HR')) {
     Logger.log('An HR-role user already exists in Users sheet - nothing to do.');
     return;
   }
+  const DEFAULT_PW = 'ChangeMe@123';
+  const salt = makeSalt();
   appendRow(SHEETS.USERS, {
-    'User ID': 'hr1', 'Password': 'ChangeMe@123', 'Staff ID': '', 'Staff Name': 'HR Admin',
-    'Role': 'HR', 'Status': 'Active'
+    'User ID': 'hr1', 'Password Hash': hashPassword(DEFAULT_PW, salt), 'Salt': salt,
+    'Staff ID': '', 'Staff Name': 'HR Admin', 'Role': 'HR', 'Status': 'Active',
+    'Must Change Password': 'Yes'
   });
-  Logger.log('Added seed HR user (User ID: hr1, Password: ChangeMe@123). Change the password before going live, and add/convert real HR users the same way (a Users sheet row with Role = "HR").');
+  Logger.log('Added seed HR user (User ID: hr1, Password: ' + DEFAULT_PW + ', hashed, never stored in plaintext). ' +
+    '"Must Change Password" = Yes, so this account is forced to set its own real password on first login. ' +
+    'Add/convert real HR users the same way (a Users sheet row with Role = "HR").');
+}
+
+// Run ONCE (from the Apps Script editor) ONLY if migrateAddHRRole() already
+// ran on this spreadsheet before the fix above - i.e. a 'hr1' row exists
+// with a plaintext 'Password' column and no hash. Re-hashes it in place
+// with a fresh salt and forces a change on next login, same as a fixed
+// migrateAddHRRole() would have done. Safe to re-run - does nothing once
+// hr1 already has a 'Password Hash'.
+function fixPlaintextHRSeedPassword() {
+  const users = readAll(SHEETS.USERS);
+  const hr = users.find(u => u['User ID'] === 'hr1');
+  if (!hr) { Logger.log('No hr1 user found - nothing to do.'); return; }
+  if (hr['Password Hash']) { Logger.log('hr1 already has a Password Hash - nothing to do.'); return; }
+  const DEFAULT_PW = 'ChangeMe@123';
+  const salt = makeSalt();
+  updateRow(SHEETS.USERS, hr._row, {
+    'Password Hash': hashPassword(DEFAULT_PW, salt), 'Salt': salt, 'Password': '',
+    'Must Change Password': 'Yes'
+  });
+  Logger.log('hr1 password re-hashed and "Must Change Password" set to Yes. It will be forced to set a real password on next login.');
 }
 
 // P0 SAFETY GUARD (audit fix - data-loss risk): buildSheet() used to
