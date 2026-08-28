@@ -131,6 +131,7 @@ tr:hover td{background:#FFFBF3;}
 .badge.warn{background:#FCEBC9; color:var(--warn);}
 
 .btn{padding:8px 14px; border-radius:7px; font-size:12.5px; font-weight:600;}
+.btn:disabled{opacity:0.5; cursor:not-allowed;}
 .btn-brown{background:var(--coffee-700); color:#fff;}
 .btn-brown:hover{background:var(--coffee-900);}
 .btn-outline{background:#fff; border:1.4px solid var(--coffee-700); color:var(--coffee-700);}
@@ -1542,7 +1543,19 @@ function hasTeamWorkflows(activityId) {
 /* ============================================================
    API WRAPPER
    ============================================================ */
-async function callApi(action, params) {
+// BUGFIX (post-live, mirrors the Sidebar's session-race fix): loadDashboard()/
+// enterApp() fire several callApi() calls in parallel right after login, each
+// hitting the deployed web app as its own separate Apps Script execution.
+// CacheService.put()/get() (used by createSession()/resolveSession() in
+// Code.gs) can have a brief propagation lag between concurrent executions on
+// different backend instances, so one of these calls can occasionally miss
+// seeing the token login *just* wrote and come back with sessionExpired:true
+// even though the session is perfectly valid - producing exactly one
+// "Session expired" toast right after login while the rest of the dashboard
+// loads and renders normally. Fix: retry a sessionExpired failure once after
+// a short delay before treating it as real; only a call that fails twice in
+// a row (or a genuinely stale/idle-timed-out session) actually logs out.
+async function callApi(action, params, _retried) {
   if (!API_URL || API_URL.indexOf('PASTE_') === 0) {
     throw new Error('Backend not connected yet. Deploy code.gs and set API_URL (see SETUP.md).');
   }
@@ -1559,9 +1572,28 @@ async function callApi(action, params) {
     headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids CORS preflight on Apps Script
     body: JSON.stringify({ action, params })
   });
-  const out = await res.json();
+  // DEFENSIVE PARSE (bugfix): res.json() used to be called directly here. If
+  // Apps Script ever answers with an HTML page instead of our JSON - a stale/
+  // wrong deployment URL, a login/permission interstitial, an execution
+  // timeout, or a quota page - res.json() throws a cryptic low-level error
+  // ("Unexpected token '<', "<!DOCTYPE "... is not valid JSON") that gives the
+  // user no idea what actually went wrong. Read as text first and parse
+  // ourselves so a non-JSON response becomes one clear, actionable message.
+  const rawText = await res.text();
+  let out;
+  try {
+    out = JSON.parse(rawText);
+  } catch (parseErr) {
+    throw new Error('Server returned an unexpected response (not JSON) for "' + action + '". ' +
+      'This usually means the deployment URL is stale, or a permission/session issue on the Apps Script side. ' +
+      'Try reloading the page; if it persists, check that API_URL matches the current Web App deployment.');
+  }
   if (!out.ok) {
     if (out.sessionExpired) {
+      if (!_retried && action !== 'login') {
+        await new Promise(r => setTimeout(r, 500));
+        return callApi(action, params, true);
+      }
       logout();
       throw new Error('Your session expired. Please log in again.');
     }
@@ -1767,7 +1799,21 @@ async function enterApp() {
     if (MASTERS.memoCategories) MEMO_CATEGORIES = MASTERS.memoCategories;
     if (MASTERS.memoDecisionOptions) MEMO_DECISIONS = MASTERS.memoDecisionOptions;
     if (MASTERS.teamWorkflowIds) TEAM_WORKFLOW_IDS = MASTERS.teamWorkflowIds;
-  } catch (e) { toast(e.message); }
+  } catch (e) {
+    // BUGFIX: if the saved session token had already expired on the server
+    // (e.g. reopening the app after the idle timeout), callApi() has
+    // already called logout() internally - it hid #app, showed the login
+    // screen again, and set SESSION = null. Previously this catch block
+    // only toasted the error and fell through to buildNav(), which then
+    // ran against a null SESSION and an empty MASTERS ({staff:[],
+    // activities:[], workflows:[]}) - the login screen would flash back
+    // but the app underneath was left built with no Activities/Staff in
+    // the Working Register, Masters, etc. dropdowns. Stop here instead:
+    // if SESSION is gone, logout() already put the UI in the right state,
+    // so there's nothing left for enterApp() to finish setting up.
+    toast(e.message);
+    if (!SESSION) return;
+  }
   buildNav();
   document.getElementById('regDate').valueAsDate = new Date();
   document.getElementById('attDate').valueAsDate = new Date();
@@ -1961,8 +2007,8 @@ document.addEventListener('click', (e) => {
     case 'openEditDraft': openEditDraft(id); break;
     case 'submitDraft': submitDraft(id); break;
     case 'deleteDraft': deleteDraft(id); break;
-    case 'decideApprovalLines': decideApprovalLines(id, decision); break;
-    case 'decideApprovalGroup': decideApprovalGroup(id, decision); break;
+    case 'decideApprovalLines': decideApprovalLines(id, decision, btn); break;
+    case 'decideApprovalGroup': decideApprovalGroup(id, decision, btn); break;
     case 'openWorkflowEdit': openWorkflowEdit(id); break;
     case 'decideLeaveRequest': decideLeaveRequest(id, decision); break;
     case 'deleteMonthlyTarget': deleteMonthlyTarget(id); break;
@@ -2569,10 +2615,20 @@ function renderApprovalGroupCard(g) {
 // same submission - uses approveEntryLine for a single line and
 // approveEntryLines for several, exactly matching what each backend action
 // expects.
-async function decideApprovalLines(lineIdsCsv, decision) {
+async function decideApprovalLines(lineIdsCsv, decision, btn) {
   const lineIds = lineIdsCsv.split(',');
   let reason = '';
   if (decision === 'Rejected') reason = prompt(T('rejectReasonPrompt')) || '';
+  // ANTI-DOUBLE-CLICK (bugfix): disable both buttons for this line the
+  // instant one is clicked, not after the server responds. Without this, a
+  // second click on the same still-visible button before the list re-renders
+  // sends the same lineId twice and the second call correctly gets rejected
+  // server-side with "Invalid transition ... cannot move from Approved to
+  // Approved" - harmless, but a confusing error for something that already
+  // succeeded. Re-enabled only on failure; on success the whole card is
+  // re-rendered by refreshRegisterViews() so there's nothing left to re-enable.
+  const siblingBtns = btn ? btn.parentElement.querySelectorAll('[data-action="decideApprovalLines"]') : [];
+  siblingBtns.forEach(b => b.disabled = true);
   try {
     if (lineIds.length === 1) {
       await callApi('approveEntryLine', { lineId: lineIds[0], decision, reason });
@@ -2581,19 +2637,27 @@ async function decideApprovalLines(lineIdsCsv, decision) {
     }
     toast(decision === 'Approved' ? T('decision_Approved') : T('decision_Rejected'));
     refreshRegisterViews();
-  } catch (e) { toast(e.message); }
+  } catch (e) {
+    toast(e.message);
+    siblingBtns.forEach(b => b.disabled = false);
+  }
 }
 
 // "Approve All" convenience for a card with more than one job - decides
 // every currently-Submitted line in the group via approveEntryGroup.
-async function decideApprovalGroup(groupId, decision) {
+async function decideApprovalGroup(groupId, decision, btn) {
   let reason = '';
   if (decision === 'Rejected') reason = prompt(T('rejectReasonPrompt')) || '';
+  // Same anti-double-click guard as decideApprovalLines() above.
+  if (btn) btn.disabled = true;
   try {
     await callApi('approveEntryGroup', { groupId, decision, reason });
     toast(decision === 'Approved' ? T('decision_Approved') : T('decision_Rejected'));
     refreshRegisterViews();
-  } catch (e) { toast(e.message); }
+  } catch (e) {
+    toast(e.message);
+    if (btn) btn.disabled = false;
+  }
 }
 
 /* ============================================================
