@@ -575,17 +575,35 @@ function ui_getStaffList(params) {
     .map(s => ({ staffId: s['Staff ID'], staffName: s['Staff Name'], designation: s['Designation'] }));
 }
 
-function ui_getRecognitionTypes(params) {
-  requireUiSession_(params && params.token);
+// TRUSTED-INTERNAL HELPERS (getMasters() runtime fix): the two functions
+// below contain the actual Recognition/Memo type lookup logic and require
+// no session/token of their own. They exist so that getMasters() - which
+// already runs behind handle()'s central session check (see PUBLIC_ACTIONS)
+// - can read this same data without needing to fabricate or forward a
+// google.script.run-style token that only the Sidebar's ui_* wrappers use.
+// The public ui_getRecognitionTypes()/ui_getMemoTypes() wrappers below
+// remain the only way to reach this data from the Sidebar, and still
+// enforce requireUiSession_() exactly as before - nothing about their
+// authentication changed, they just delegate the actual lookup here.
+function _getRecognitionTypesInternal_() {
   return Object.keys(HR_POLICY.RECOGNITION_BONUS).map(type => ({
     type: type, bonus: HR_POLICY.RECOGNITION_BONUS[type],
     isRange: type === 'Special Appreciation', range: HR_POLICY.SPECIAL_APPRECIATION_RANGE
   }));
 }
 
+function _getMemoTypesInternal_() {
+  return Object.keys(HR_POLICY.MEMO_DEDUCTION).map(type => ({ type: type, deduction: HR_POLICY.MEMO_DEDUCTION[type] }));
+}
+
+function ui_getRecognitionTypes(params) {
+  requireUiSession_(params && params.token);
+  return _getRecognitionTypesInternal_();
+}
+
 function ui_getMemoTypes(params) {
   requireUiSession_(params && params.token);
-  return Object.keys(HR_POLICY.MEMO_DEDUCTION).map(type => ({ type: type, deduction: HR_POLICY.MEMO_DEDUCTION[type] }));
+  return _getMemoTypesInternal_();
 }
 
 // SINGLE SOURCE OF TRUTH (audit item 18): added so the Sidebar (and any
@@ -654,7 +672,24 @@ function ui_addDisciplinaryAction(params) {
 }
 
 function ui_getFullAppraisal(params) {
-  return api.getFullAppraisal(resolveUiActor_(params));
+  const actor = resolveUiActor_(params);
+  // SIDEBAR AUTH FIX (audit finding, Aug 2026): api.getFullAppraisal() has no
+  // role/scope check of its own - the JSON API path (index.html -> handle())
+  // is safe only because STAFF_SCOPED_READ_ACTIONS force-sets p.staffId to
+  // the session's own staffId whenever the trusted role is 'Staff'. This
+  // Sidebar wrapper never applied that same rule - ui_login() allows ANY
+  // role (including Staff) to log into the Sidebar, and resolveUiActor_()
+  // above only verifies identity, it does not scope staffId. A Staff user
+  // calling ui_getFullAppraisal with no staffId therefore got the WHOLE
+  // department's appraisal data (combinedFinalScore, HR remarks, memos,
+  // criteria breakdown) - the exact class of leak already fixed for
+  // getAppraisal()/getPendingApprovals() on the JSON API side. Mirror the
+  // same force-set rule here so the Sidebar path can never be more
+  // permissive than the JSON API for the same data.
+  if (actor.actorRole === 'Staff') {
+    actor.staffId = actor.actorStaffId;
+  }
+  return api.getFullAppraisal(actor);
 }
 
 function ui_saveAppraisalSnapshot(params) {
@@ -766,7 +801,11 @@ function resolveSession(token) {
   // Cache entry aged out (6h+ since last hit) - check the slow path before
   // declaring the session dead.
   const raw = props.getProperty(key);
-  if (!raw) return null;
+  if (!raw) {
+    // TRUE miss: neither CacheService nor PropertiesService has this token
+    // - either genuinely wrong/stale, or from an old deployment.
+    return null;
+  }
   let rec;
   try { rec = JSON.parse(raw); } catch (e) { props.deleteProperty(key); return null; }
   const idleMs = Date.now() - (rec.lastActivity || 0);
@@ -1766,7 +1805,21 @@ function computeDashboardKpiForRange_(from, to, staffId) {
     totalMaxScore += computeStaffFixedActiveWorkflowMaxScore_(sId, workflows);
   });
 
-  const totalKpiPct = totalMaxScore > 0 ? Math.round((totalKpiScore / totalMaxScore) * 10000) / 100 : 0;
+  // CAP AT 100 (Aug 2026 fix - Dashboard parity): mirrors the same clamp
+  // already applied in computeStoresKPIPct(). 'totalKpiScore' is built from
+  // each Register row's FROZEN historical Weightage % (Historical Freeze
+  // policy), while 'totalMaxScore' is the CURRENT/live sum of Weightage %
+  // across today's Active workflows (computeStaffFixedActiveWorkflowMaxScore_).
+  // If a Workflow's Weightage % was reduced after entries were Approved
+  // (e.g. the Physical:System 60:40 recalibration), 'totalKpiScore' can
+  // legitimately exceed 'totalMaxScore' and the raw % can exceed 100 -
+  // without this clamp the Dashboard's "Total KPI % (MTD)" card could show
+  // e.g. 100.6% even though every other KPI %/headline-score consumer
+  // (computeStoresKPIPct(), getMyScore()) is already clamped to 0-100.
+  // This keeps the Dashboard card consistent with those single-source-of-
+  // truth callers of computeStaffFixedActiveWorkflowMaxScore_().
+  const totalKpiPctRaw = totalMaxScore > 0 ? (totalKpiScore / totalMaxScore) * 100 : 0;
+  const totalKpiPct = Math.round(clamp(totalKpiPctRaw, 0, 100) * 100) / 100;
 
   return {
     totalEntries: rows.length,
@@ -1911,17 +1964,7 @@ const api = {
   },
 
   // ---------- MASTERS (read) ----------
-  // LIVE BUG FIX (post single-source-of-truth refactor): this used to take
-  // no parameter at all, so the two calls below to ui_getRecognitionTypes()/
-  // ui_getMemoTypes() ran with no token even though handle() always calls
-  // api[action](params) with the caller's real params (including token).
-  // Since those two getters were hardened earlier to require a valid
-  // session via requireUiSession_(), calling them with no token made them
-  // throw "Session expired" on every single call - and because index.html
-  // calls getMasters() immediately after login, this broke the dashboard
-  // load for every role, every time, regardless of session validity. Now
-  // accepts p and forwards it so the real session token reaches both calls.
-  getMasters: function (p) {
+  getMasters: function () {
     return {
       company: readAll(SHEETS.COMPANY),
       sections: readAll(SHEETS.SECTION),
@@ -1933,10 +1976,20 @@ const api = {
       // in index.html (RECOGNITION_TYPES/MEMO_TYPES/MEMO_CATEGORIES consts),
       // duplicating HR_POLICY above - editing HR_POLICY alone would silently
       // stop matching what the dropdowns showed. index.html now reads these
-      // three lists from here (see ui_getRecognitionTypes/ui_getMemoTypes,
-      // reused below) instead of keeping its own copy.
-      recognitionTypes: ui_getRecognitionTypes(p),
-      memoTypes: ui_getMemoTypes(p),
+      // three lists from here instead of keeping its own copy.
+      //
+      // GETMASTERS RUNTIME FIX: this used to call ui_getRecognitionTypes()/
+      // ui_getMemoTypes() directly, but those require params.token and
+      // throw via requireUiSession_() when called with no params - which is
+      // exactly what happened here, since getMasters() is invoked with no
+      // params at all. getMasters() already only runs after handle() has
+      // independently verified the caller's session (see PUBLIC_ACTIONS),
+      // so it reads the same underlying data through the session-free
+      // internal helpers instead. The ui_* wrappers (used by the Sidebar,
+      // which calls them directly via google.script.run and bypasses
+      // handle() entirely) are unchanged and still require a valid token.
+      recognitionTypes: _getRecognitionTypesInternal_(),
+      memoTypes: _getMemoTypesInternal_(),
       memoCategories: HR_POLICY.MEMO_CATEGORIES.slice(),
       memoDecisionOptions: HR_POLICY.MEMO_DECISION_OPTIONS.slice(),
       // SINGLE SOURCE OF TRUTH: TEAM_WORKFLOW_IDS used to also be hardcoded
@@ -2055,24 +2108,37 @@ const api = {
   // ---------- MASTERS (write - Manager only, enforced client-side + here) ----------
   addStaff: function (p) {
     requireManager(p.actorRole);
-    const ids = readAll(SHEETS.STAFF).map(s => s['Staff ID']);
-    const id = p.staffId || nextId('EMP', ids);
-    // VALIDATION (audit item 23): reject a manually-supplied Staff ID that
-    // already exists - previously an auto-generated ID (blank p.staffId) was
-    // always unique, but a Manager typing in an existing ID silently created
-    // a second Staff Master row sharing it, which then corrupts every
-    // staffId-keyed lookup (Working Register, Attendance, Leave, Appraisal).
-    if (p.staffId && ids.indexOf(p.staffId) !== -1) {
-      throw new Error('Staff ID "' + p.staffId + '" already exists. Staff ID must be unique.');
-    }
     if (!p.staffName || !String(p.staffName).trim()) throw new Error('Staff Name is required');
-    appendRow(SHEETS.STAFF, {
-      'Staff ID': id, 'Staff Name': p.staffName, 'Designation': p.designation,
-      'Section': p.section, 'Reporting Manager': p.reportingManager,
-      'Date of Joining': p.doj, 'Status': p.status || 'Active'
-    });
-    logAudit(p.actorUserId, 'ADD_STAFF', id);
-    return { staffId: id };
+    // CONCURRENCY FIX (live audit, Aug 2026): nextId() reads the current max
+    // ID and appendRow() writes the new one - without a lock, two concurrent
+    // addStaff calls (double-click, two Manager tabs/users) could both read
+    // the same max and both generate/save the SAME auto Staff ID, silently
+    // creating two Staff Master rows sharing one ID and corrupting every
+    // staffId-keyed lookup (Working Register, Attendance, Leave, Appraisal).
+    // Same LockService pattern as addWorkingEntries()/approveEntryGroup().
+    const lock = LockService.getScriptLock();
+    lock.waitLock(15000);
+    try {
+      const ids = readAll(SHEETS.STAFF).map(s => s['Staff ID']);
+      const id = p.staffId || nextId('EMP', ids);
+      // VALIDATION (audit item 23): reject a manually-supplied Staff ID that
+      // already exists - previously an auto-generated ID (blank p.staffId) was
+      // always unique, but a Manager typing in an existing ID silently created
+      // a second Staff Master row sharing it, which then corrupts every
+      // staffId-keyed lookup (Working Register, Attendance, Leave, Appraisal).
+      if (p.staffId && ids.indexOf(p.staffId) !== -1) {
+        throw new Error('Staff ID "' + p.staffId + '" already exists. Staff ID must be unique.');
+      }
+      appendRow(SHEETS.STAFF, {
+        'Staff ID': id, 'Staff Name': p.staffName, 'Designation': p.designation,
+        'Section': p.section, 'Reporting Manager': p.reportingManager,
+        'Date of Joining': p.doj, 'Status': p.status || 'Active'
+      });
+      logAudit(p.actorUserId, 'ADD_STAFF', id);
+      return { staffId: id };
+    } finally {
+      lock.releaseLock();
+    }
   },
 
   updateStaff: function (p) {
@@ -2095,32 +2161,52 @@ const api = {
   addSection: function (p) {
     requireManager(p.actorRole);
     if (!p.sectionName || !String(p.sectionName).trim()) throw new Error('Section Name is required');
-    const sections = readAll(SHEETS.SECTION);
-    const name = String(p.sectionName).trim();
-    if (sections.some(s => String(s['Section Name']).trim().toLowerCase() === name.toLowerCase())) {
-      throw new Error('Section "' + name + '" already exists.');
+    // CONCURRENCY FIX (live audit, Aug 2026) - same ID-collision race as
+    // addStaff() above, wrapped the same way.
+    const lock = LockService.getScriptLock();
+    lock.waitLock(15000);
+    try {
+      const sections = readAll(SHEETS.SECTION);
+      const name = String(p.sectionName).trim();
+      if (sections.some(s => String(s['Section Name']).trim().toLowerCase() === name.toLowerCase())) {
+        throw new Error('Section "' + name + '" already exists.');
+      }
+      const ids = sections.map(s => s['Section ID']);
+      const id = nextId('SEC', ids);
+      appendRow(SHEETS.SECTION, { 'Section ID': id, 'Section Name': name });
+      logAudit(p.actorUserId, 'ADD_SECTION', id + ' | ' + name);
+      return { sectionId: id };
+    } finally {
+      lock.releaseLock();
     }
-    const ids = sections.map(s => s['Section ID']);
-    const id = nextId('SEC', ids);
-    appendRow(SHEETS.SECTION, { 'Section ID': id, 'Section Name': name });
-    logAudit(p.actorUserId, 'ADD_SECTION', id + ' | ' + name);
-    return { sectionId: id };
   },
 
   updateSection: function (p) {
     requireManager(p.actorRole);
-    const sections = readAll(SHEETS.SECTION);
-    const s = sections.find(x => x['Section ID'] === p.sectionId);
-    if (!s) throw new Error('Section not found');
     if (!p.sectionName || !String(p.sectionName).trim()) throw new Error('Section Name is required');
-    const name = String(p.sectionName).trim();
-    if (sections.some(x => x['Section ID'] !== p.sectionId && String(x['Section Name']).trim().toLowerCase() === name.toLowerCase())) {
-      throw new Error('Section "' + name + '" already exists.');
+    // CONCURRENCY FIX (audit finding, Aug 2026): this had the same
+    // duplicate-name check-then-write race that addSection() was already
+    // locked against - two concurrent renames could both pass the
+    // uniqueness check before either wrote, leaving two Sections with the
+    // same name. Wrapped with the same LockService pattern used by
+    // addSection/addActivity/addMonthlyTarget above.
+    const lock = LockService.getScriptLock();
+    lock.waitLock(15000);
+    try {
+      const sections = readAll(SHEETS.SECTION);
+      const s = sections.find(x => x['Section ID'] === p.sectionId);
+      if (!s) throw new Error('Section not found');
+      const name = String(p.sectionName).trim();
+      if (sections.some(x => x['Section ID'] !== p.sectionId && String(x['Section Name']).trim().toLowerCase() === name.toLowerCase())) {
+        throw new Error('Section "' + name + '" already exists.');
+      }
+      const oldName = s['Section Name'];
+      updateRow(SHEETS.SECTION, s._row, { 'Section Name': name });
+      logAudit(p.actorUserId, 'UPDATE_SECTION', p.sectionId + ' | "' + oldName + '" -> "' + name + '"');
+      return { success: true };
+    } finally {
+      lock.releaseLock();
     }
-    const oldName = s['Section Name'];
-    updateRow(SHEETS.SECTION, s._row, { 'Section Name': name });
-    logAudit(p.actorUserId, 'UPDATE_SECTION', p.sectionId + ' | "' + oldName + '" -> "' + name + '"');
-    return { success: true };
   },
 
   // ---------- ACTIVITY MASTER (audit fix: was Google-Sheet-only editing) ----------
@@ -2131,32 +2217,60 @@ const api = {
     requireManager(p.actorRole);
     if (!p.activityName || !String(p.activityName).trim()) throw new Error('Activity Name is required');
     if (!p.activityCode || !String(p.activityCode).trim()) throw new Error('Activity Code is required');
-    const activities = readAll(SHEETS.ACTIVITY);
-    const ids = activities.map(a => a['Activity ID']);
-    const id = p.activityId || nextId('ACT', ids);
-    if (p.activityId && ids.indexOf(p.activityId) !== -1) {
-      throw new Error('Activity ID "' + p.activityId + '" already exists. Activity ID must be unique.');
+    // CONCURRENCY FIX (live audit, Aug 2026) - same ID-collision race as
+    // addStaff() above, wrapped the same way.
+    const lock = LockService.getScriptLock();
+    lock.waitLock(15000);
+    try {
+      const activities = readAll(SHEETS.ACTIVITY);
+      const ids = activities.map(a => a['Activity ID']);
+      const id = p.activityId || nextId('ACT', ids);
+      if (p.activityId && ids.indexOf(p.activityId) !== -1) {
+        throw new Error('Activity ID "' + p.activityId + '" already exists. Activity ID must be unique.');
+      }
+      if (activities.some(a => String(a['Activity Code']).trim().toLowerCase() === String(p.activityCode).trim().toLowerCase())) {
+        throw new Error('Activity Code "' + p.activityCode + '" already exists.');
+      }
+      appendRow(SHEETS.ACTIVITY, {
+        'Activity ID': id, 'Activity Code': String(p.activityCode).trim(), 'Activity Name': String(p.activityName).trim()
+      });
+      logAudit(p.actorUserId, 'ADD_ACTIVITY', id + ' | ' + p.activityName);
+      return { activityId: id };
+    } finally {
+      lock.releaseLock();
     }
-    if (activities.some(a => String(a['Activity Code']).trim().toLowerCase() === String(p.activityCode).trim().toLowerCase())) {
-      throw new Error('Activity Code "' + p.activityCode + '" already exists.');
-    }
-    appendRow(SHEETS.ACTIVITY, {
-      'Activity ID': id, 'Activity Code': String(p.activityCode).trim(), 'Activity Name': String(p.activityName).trim()
-    });
-    logAudit(p.actorUserId, 'ADD_ACTIVITY', id + ' | ' + p.activityName);
-    return { activityId: id };
   },
 
   updateActivity: function (p) {
     requireManager(p.actorRole);
-    const activities = readAll(SHEETS.ACTIVITY);
-    const a = activities.find(x => x['Activity ID'] === p.activityId);
-    if (!a) throw new Error('Activity not found');
     if (!p.activityName || !String(p.activityName).trim()) throw new Error('Activity Name is required');
-    const newName = String(p.activityName).trim();
-    updateRow(SHEETS.ACTIVITY, a._row, { 'Activity Name': newName });
-    logAudit(p.actorUserId, 'UPDATE_ACTIVITY', p.activityId + ' | "' + a['Activity Name'] + '" -> "' + newName + '"');
-    return { success: true };
+    // CONCURRENCY FIX (audit finding, Aug 2026): this had the same
+    // duplicate-name check-then-write race that addActivity()/updateSection()
+    // were already locked against - two concurrent renames could both pass
+    // the uniqueness check before either wrote, leaving two Activities with
+    // the same name. Wrapped with the same LockService pattern used by
+    // addStaff/addSection/addActivity/updateSection above.
+    const lock = LockService.getScriptLock();
+    lock.waitLock(15000);
+    try {
+      const activities = readAll(SHEETS.ACTIVITY);
+      const a = activities.find(x => x['Activity ID'] === p.activityId);
+      if (!a) throw new Error('Activity not found');
+      const newName = String(p.activityName).trim();
+      // VALIDATION (audit finding, Aug 2026): updateSection() already
+      // rejected a rename that collides with another row's name - updateActivity()
+      // was missing this same check, so two Activities could silently end up
+      // sharing one Activity Name.
+      if (activities.some(x => x['Activity ID'] !== p.activityId && String(x['Activity Name']).trim().toLowerCase() === newName.toLowerCase())) {
+        throw new Error('Activity "' + newName + '" already exists.');
+      }
+      const oldName = a['Activity Name'];
+      updateRow(SHEETS.ACTIVITY, a._row, { 'Activity Name': newName });
+      logAudit(p.actorUserId, 'UPDATE_ACTIVITY', p.activityId + ' | "' + oldName + '" -> "' + newName + '"');
+      return { success: true };
+    } finally {
+      lock.releaseLock();
+    }
   },
 
   // ---------- MONTHLY TARGETS (Manager only for writes) ----------
@@ -2170,31 +2284,45 @@ const api = {
     const validatedTarget = _validateMonthlyTargetValue(p.target);
     const wf = readAll(SHEETS.WORKFLOW).find(w => w['Workflow ID'] === p.workflowId);
     if (!wf) throw new Error('Unknown workflow: ' + p.workflowId);
-    const existing = readAll(SHEETS.TARGETS).find(t => normalizeMonthLabel(t['Month']) === p.month && t['Workflow ID'] === p.workflowId);
-    if (existing) {
-      const oldTarget = existing['Monthly Target'];
-      updateRow(SHEETS.TARGETS, existing._row, { 'Monthly Target': validatedTarget });
-      logAudit(p.actorUserId, 'UPDATE_MONTHLY_TARGET',
-        existing['Target ID'] + ' | ' + p.workflowId + ' ' + p.month + ' | ' + oldTarget + ' -> ' + validatedTarget);
-      return { targetId: existing['Target ID'], updated: true };
+    // CONCURRENCY FIX (live audit, Aug 2026): both the existing-row lookup
+    // (existing/new decision) and the ID-generation below were previously
+    // unlocked - two concurrent addMonthlyTarget calls for the same
+    // Workflow+Month could each see "no existing row" and both append,
+    // creating two Target rows for the same Workflow+Month (silently
+    // double-counting/ambiguous for every getEffectiveTarget() lookup), or
+    // generate a colliding auto Target ID. Same LockService pattern as
+    // addStaff()/addSection()/addActivity() above.
+    const lock = LockService.getScriptLock();
+    lock.waitLock(15000);
+    try {
+      const existing = readAll(SHEETS.TARGETS).find(t => normalizeMonthLabel(t['Month']) === p.month && t['Workflow ID'] === p.workflowId);
+      if (existing) {
+        const oldTarget = existing['Monthly Target'];
+        updateRow(SHEETS.TARGETS, existing._row, { 'Monthly Target': validatedTarget });
+        logAudit(p.actorUserId, 'UPDATE_MONTHLY_TARGET',
+          existing['Target ID'] + ' | ' + p.workflowId + ' ' + p.month + ' | ' + oldTarget + ' -> ' + validatedTarget);
+        return { targetId: existing['Target ID'], updated: true };
+      }
+      const ids = readAll(SHEETS.TARGETS).map(t => t['Target ID']);
+      const id = nextId('MT', ids);
+      appendRow(SHEETS.TARGETS, {
+        'Target ID': id,
+        'Month': p.month,
+        'Activity ID': p.activityId,
+        'Activity Name': wf['Activity Name'],
+        'Unit': wf['Unit'],
+        'Workflow ID': p.workflowId,
+        'Workflow Name': wf['Workflow Name'],
+        'KPI Name': wf['KPI Name'],
+        'Monthly Target': validatedTarget,
+        'Created By': p.actorUserId,
+        'Created On': new Date()
+      });
+      logAudit(p.actorUserId, 'ADD_MONTHLY_TARGET', id);
+      return { targetId: id, updated: false };
+    } finally {
+      lock.releaseLock();
     }
-    const ids = readAll(SHEETS.TARGETS).map(t => t['Target ID']);
-    const id = nextId('MT', ids);
-    appendRow(SHEETS.TARGETS, {
-      'Target ID': id,
-      'Month': p.month,
-      'Activity ID': p.activityId,
-      'Activity Name': wf['Activity Name'],
-      'Unit': wf['Unit'],
-      'Workflow ID': p.workflowId,
-      'Workflow Name': wf['Workflow Name'],
-      'KPI Name': wf['KPI Name'],
-      'Monthly Target': validatedTarget,
-      'Created By': p.actorUserId,
-      'Created On': new Date()
-    });
-    logAudit(p.actorUserId, 'ADD_MONTHLY_TARGET', id);
-    return { targetId: id, updated: false };
   },
 
   updateMonthlyTarget: function (p) {
@@ -2541,23 +2669,38 @@ const api = {
   },
 
   submitEntryGroup: function (p) {
-    // moves all rows for a groupId from Draft -> Submitted
-    const rows = readAll(SHEETS.REGISTER).filter(r => r['Entry Group ID'] === p.groupId);
-    if (rows.length === 0) throw new Error('Entry group not found');
-    // OWNERSHIP CHECK (audit item 4) - p.actorStaffId is the server-verified
-    // logged-in staff, never the client-editable p.staffId. A Staff user may
-    // only submit their own Draft; Manager may submit on anyone's behalf.
-    if (p.actorRole !== 'Manager' && rows[0]['Logged By ID'] !== p.actorStaffId) {
-      throw new Error('Not authorized to submit this entry');
+    // CONCURRENCY FIX (live audit, Aug 2026): this read-then-write state
+    // transition (Draft -> Submitted) previously ran with no lock, unlike
+    // every sibling entry-group action right below it (approveEntryGroup,
+    // updateEntryGroup, deleteEntryGroup) which all wrap the same
+    // read-check-write pattern in LockService. A submitEntryGroup racing a
+    // concurrent updateEntryGroup/deleteEntryGroup call on the same group
+    // (e.g. double-click, or a staff editing a draft in one tab while
+    // submitting from another) could interleave and leave rows in an
+    // inconsistent Approval Status. Wrapped the same way.
+    const lock = LockService.getScriptLock();
+    lock.waitLock(15000);
+    try {
+      // moves all rows for a groupId from Draft -> Submitted
+      const rows = readAll(SHEETS.REGISTER).filter(r => r['Entry Group ID'] === p.groupId);
+      if (rows.length === 0) throw new Error('Entry group not found');
+      // OWNERSHIP CHECK (audit item 4) - p.actorStaffId is the server-verified
+      // logged-in staff, never the client-editable p.staffId. A Staff user may
+      // only submit their own Draft; Manager may submit on anyone's behalf.
+      if (p.actorRole !== 'Manager' && rows[0]['Logged By ID'] !== p.actorStaffId) {
+        throw new Error('Not authorized to submit this entry');
+      }
+      // STATE VALIDATION: every row in the group must currently be Draft -
+      // blocks re-submitting an already-Submitted/Approved/Rejected group.
+      rows.forEach(r => api._assertTransition(r['Approval Status'], 'Submitted', 'Entry Group ' + p.groupId));
+      rows.forEach(r => updateRow(SHEETS.REGISTER, r._row, {
+        'Approval Status': 'Submitted', 'Submitted On': new Date()
+      }));
+      logAudit(p.actorStaffId, 'SUBMIT_ENTRY_GROUP', p.groupId);
+      return { success: true, count: rows.length };
+    } finally {
+      lock.releaseLock();
     }
-    // STATE VALIDATION: every row in the group must currently be Draft -
-    // blocks re-submitting an already-Submitted/Approved/Rejected group.
-    rows.forEach(r => api._assertTransition(r['Approval Status'], 'Submitted', 'Entry Group ' + p.groupId));
-    rows.forEach(r => updateRow(SHEETS.REGISTER, r._row, {
-      'Approval Status': 'Submitted', 'Submitted On': new Date()
-    }));
-    logAudit(p.actorStaffId, 'SUBMIT_ENTRY_GROUP', p.groupId);
-    return { success: true, count: rows.length };
   },
 
   // Same whole-transaction locking pattern as approveEntryLine/approveEntryLines
@@ -2729,7 +2872,16 @@ const api = {
     return withTeamSplit(rows, approvedAll);
   },
 
-  getPendingApprovals: function () {
+  getPendingApprovals: function (p) {
+    // AUTH FIX (live audit, Aug 2026): previously took no params at all, so
+    // actorRole was never even available to check, and its call to
+    // getEntryGroups({status:'Submitted'}) carried no staffId - a direct
+    // action:'getPendingApprovals' call by ANY logged-in Staff user (this
+    // action was never added to STAFF_SCOPED_READ_ACTIONS, since it's meant
+    // to be Manager-only) returned every staff member's Submitted entries
+    // department-wide. Gated the same as the 'approvals' nav tab
+    // (NAV_ITEMS: roles:['Manager']) this exists to serve.
+    requireManager(p.actorRole);
     return api.getEntryGroups({ status: 'Submitted' });
   },
 
@@ -3028,6 +3180,18 @@ const api = {
   },
 
   getAppraisal: function (p) {
+    // AUTH FIX (live audit, Aug 2026): this returns EVERY staff member's
+    // aggregated KPI score/rating/section for the requested range - the
+    // frontend only ever reaches it from the Manager-only 'appraisal' nav
+    // tab (NAV_ITEMS: roles:['Manager']), but that is UI convenience only,
+    // same as every other cross-staff aggregate in this file. Before this
+    // fix there was NO server-side check at all, so any logged-in Staff
+    // user could call action:'getAppraisal' directly (valid session token,
+    // forged request) and pull the whole department's appraisal data -
+    // exactly the class of bug already fixed for getHRLiveDashboard/
+    // getHRManagementSummary/getHRDashboard above. Matches the UI's
+    // Manager-only gating.
+    requireManager(p.actorRole);
     // p.from, p.to (custom range only, per spec). Returns per-staff aggregated appraisal.
     // SINGLE-SOURCE FIX (Option B audit, Aug 2026): this used to sum each
     // Approved row's own 'Effective KPI Score'/'Effective Weightage %'
@@ -3065,12 +3229,25 @@ const api = {
       // Team-Split Size resolves correctly regardless of which staff this
       // loop iteration is on.
       const groups = computeStaffWorkflowKpiGroups_(staffRows, approvedInRange, workflows, monthlyTargets);
-      const totalKpiScore = Math.round(groups.reduce((s, g) => s + g.kpiScore, 0) * 100) / 100;
+      const totalKpiScoreRaw = Math.round(groups.reduce((s, g) => s + g.kpiScore, 0) * 100) / 100;
       // FIXED DENOMINATOR (Option B) - identical helper/inputs used by
       // computeStoresKPIPct()/getDashboard()/getMyScore()/getStoresKpiDebug(),
       // not a per-row/per-entered-Workflow sum that used to grow (and could
       // make Overall % drop) the moment a new Workflow got its first Approval.
       const totalMaxScore = computeStaffFixedActiveWorkflowMaxScore_(staffId, workflows);
+      // CAP AT MAX SCORE (Aug 2026 fix - sidebar Staff Appraisal tab parity
+      // with getMyScore()/computeStoresKPIPct()): 'totalKpiScoreRaw' is built
+      // from each Register row's FROZEN historical Weightage % while
+      // 'totalMaxScore' is the CURRENT/live sum of Weightage % across
+      // today's Active workflows - the exact same Historical Freeze
+      // mismatch already clamped in getMyScore() and computeStoresKPIPct(),
+      // but this Manager-only "Staff Appraisal" nav tab (action:'getAppraisal',
+      // a THIRD, separate code path from both of those) had never received
+      // the same fix, so it kept showing e.g. 122.7/197.1 - a different,
+      // uncapped number from the "Reports > Staff Appraisal" screen for the
+      // identical staff/period. Clamping here brings all three appraisal
+      // surfaces into agreement.
+      const totalKpiScore = Math.round(clamp(totalKpiScoreRaw, 0, totalMaxScore) * 100) / 100;
       agg[staffId] = {
         staffId, staffName: staffRows[0]['Staff Name'],
         designation: sm ? sm['Designation'] : '', section: sm ? sm['Section'] : '',
@@ -3167,7 +3344,7 @@ const api = {
       };
     }).sort((a, b) => a.month === b.month ? a.workflowName.localeCompare(b.workflowName) : a.month.localeCompare(b.month));
 
-    const totalScore = Math.round(
+    const totalScoreRaw = Math.round(
       kpis.filter(k => STORES_KPI_EXCLUDED_ACTIVITY_IDS.indexOf(
         (workflows.find(w => w['Workflow ID'] === k.workflowId) || {})['Activity ID']
       ) === -1).reduce((s, k) => s + k.kpiScore, 0) * 100
@@ -3183,6 +3360,22 @@ const api = {
     // staff has entries for, Attendance included, for visibility) - only
     // this headline total/percentage is scoped to match "Stores KPI".
     const totalMaxScore = computeStaffFixedActiveWorkflowMaxScore_(staffId, workflows);
+    // CAP AT MAX SCORE (Aug 2026 fix - Reports/My Score parity with
+    // Dashboard): each individual kpiScore is already capped at its own
+    // Weightage % (computeKpiScore() caps Achievement % at 100 before
+    // applying Weightage), but 'totalScoreRaw' is built from each Register
+    // row's FROZEN historical Weightage % (Historical Freeze policy) while
+    // 'totalMaxScore' is the CURRENT/live sum of Weightage % across today's
+    // Active workflows. If a Workflow's Weightage % was reduced after
+    // entries were Approved, totalScoreRaw can legitimately exceed
+    // totalMaxScore and Overall % can exceed 100 (e.g. the 122.72% /
+    // 197.07% seen in the Staff Performance report) even though
+    // getDashboard()'s Total KPI % (MTD) card is already clamped. This
+    // brings getMyScore() - and every report built on it (Staff
+    // Performance, Staff Appraisal, the Staff's own My Score screen) -
+    // into line with that same 0-100 cap, so Overall %/KPI Score can never
+    // show above the fixed 100-point ceiling anywhere in the app.
+    const totalScore = Math.round(clamp(totalScoreRaw, 0, totalMaxScore) * 100) / 100;
     const overallPct = totalMaxScore > 0 ? Math.round((totalScore / totalMaxScore) * 10000) / 100 : 0;
 
     return {
@@ -3328,7 +3521,14 @@ const api = {
     // source of truth, spec section 10), scoped to p.section if given but
     // never to a single p.staffId (a company/section-wide total, not one
     // person's).
-    const wfRows = _buildWorkflowPerfRows({ from: p.from, to: p.to, section: p.section });
+    // ENTRYCOUNT>0 FILTER (Aug 2026 fix - full Report consistency): applies
+    // the same filter as Section/Activity/KPI-Workflow Performance's
+    // aggregators above, for the same reason - without it, a Workflow
+    // nobody logged an Approved entry against this period still added its
+    // full Monthly Target into this summary card, so Staff Performance's
+    // "Monthly Target" card could differ by a small amount from Section
+    // Performance's for the identical date range (e.g. 32,603 vs 32,602).
+    const wfRows = _buildWorkflowPerfRows({ from: p.from, to: p.to, section: p.section }).filter(r => r.entryCount > 0);
     const summaryTarget = Math.round(wfRows.reduce((s, r) => s + r.monthlyTarget, 0) * 100) / 100;
     const summaryActual = Math.round(wfRows.reduce((s, r) => s + r.approvedActual, 0) * 100) / 100;
     const summaryBalance = Math.round((summaryTarget - summaryActual) * 100) / 100;
@@ -3345,7 +3545,17 @@ const api = {
 
   getActivityPerformanceReport: function (p) {
     _validateReportRange(p);
-    const wfRows = _buildWorkflowPerfRows(p);
+    // ENTRYCOUNT>0 FILTER (Aug 2026 fix - Section Performance parity): only
+    // Workflows that actually have an Approved entry in this date range
+    // should count toward Max Score/Overall % here - otherwise every OTHER
+    // Active Workflow nobody touched this period (which getSectionPerformanceReport()
+    // already excludes via this same filter) inflates the Max Score
+    // denominator for no reason, making the same underlying data show two
+    // different Max Score/Overall % totals depending on which report you
+    // ran (e.g. Max Score 100 here vs 98.43 on Section Performance for the
+    // identical KPI Score 73.46). Matches getSectionPerformanceReport()'s
+    // wfRows/wfRowsAll filter exactly, so both reports agree.
+    const wfRows = _buildWorkflowPerfRows(p).filter(r => r.entryCount > 0);
     const byActivity = {};
     wfRows.forEach(r => {
       const g = byActivity[r.activityId] || (byActivity[r.activityId] = {
@@ -3371,7 +3581,16 @@ const api = {
 
   getKPIWorkflowPerformanceReport: function (p) {
     _validateReportRange(p);
-    const wfRows = _buildWorkflowPerfRows(p);
+    // ENTRYCOUNT>0 FILTER (Aug 2026 fix - Section/Activity Performance
+    // parity): the frontend totals this report's Max Score column too
+    // (REPORT_DEFS.kpiWorkflowPerf.totals includes 'maxScore'), so without
+    // this filter it inherited the exact same bug just fixed on Activity
+    // Performance - every OTHER Active Workflow nobody logged an Approved
+    // entry against this period was still adding its full Weightage % to
+    // the Total Max Score row, making this report's Total Max Score/
+    // Overall % disagree with Section Performance (and now Activity
+    // Performance) for the identical date range/data.
+    const wfRows = _buildWorkflowPerfRows(p).filter(r => r.entryCount > 0);
     return wfRows.map(r => ({
       activityName: r.activityName, workflowName: r.workflowName, kpiName: r.kpiName,
       section: p.section || '', monthlyTarget: r.monthlyTarget, approvedActual: r.approvedActual,
@@ -6142,50 +6361,28 @@ function migrateHRAppraisalV2() {
 // run this once to seed a starter HR login, or (b) manually add a Role='HR'
 // row to the Users sheet / change an existing user's Role to 'HR'. Safe to
 // re-run - skips if a Role='HR' user already exists.
-// LIVE AUDIT FIX (P1, security): this used to append 'hr1' with a plaintext
-// 'Password' column and no 'Must Change Password' flag - unlike seedUsers()
-// above, which hashes the same default password with a fresh salt and
-// forces a change on first login. On any spreadsheet that predates the HR
-// role (i.e. every one where this migration actually runs), that left a
-// permanent, never-rotated, plaintext 'ChangeMe@123' credential on an HR
-// account with write access to Memo/Disciplinary/Appraisal data. Now seeds
-// the row the same hashed + forced-change way seedUsers() does.
 function migrateAddHRRole() {
   const users = readAll(SHEETS.USERS);
   if (users.some(u => u['Role'] === 'HR')) {
     Logger.log('An HR-role user already exists in Users sheet - nothing to do.');
     return;
   }
+  // SECURITY FIX (live-readiness audit, Aug 2026): this used to write the
+  // seed password in plaintext to the 'Password' column and Logger.log it
+  // in cleartext, unlike the hashed seedUsers() path used on a fresh
+  // install - inconsistent with the rest of the hardening. Now hashes+salts
+  // it the same way, blanks the legacy 'Password' column, and sets 'Must
+  // Change Password' = Yes so hr1 is forced to set a real password on
+  // first login instead of being able to stay on the default indefinitely.
   const DEFAULT_PW = 'ChangeMe@123';
   const salt = makeSalt();
   appendRow(SHEETS.USERS, {
-    'User ID': 'hr1', 'Password Hash': hashPassword(DEFAULT_PW, salt), 'Salt': salt,
-    'Staff ID': '', 'Staff Name': 'HR Admin', 'Role': 'HR', 'Status': 'Active',
-    'Must Change Password': 'Yes'
+    'User ID': 'hr1', 'Password': '', 'Password Hash': hashPassword(DEFAULT_PW, salt), 'Salt': salt,
+    'Staff ID': '', 'Staff Name': 'HR Admin', 'Role': 'HR', 'Status': 'Active', 'Must Change Password': 'Yes'
   });
-  Logger.log('Added seed HR user (User ID: hr1, Password: ' + DEFAULT_PW + ', hashed, never stored in plaintext). ' +
-    '"Must Change Password" = Yes, so this account is forced to set its own real password on first login. ' +
+  Logger.log('Added seed HR user (User ID: hr1). Password is hashed, not stored/logged in plaintext - ' +
+    '"Must Change Password" is set to Yes, so hr1 will be forced to set a real password on first login. ' +
     'Add/convert real HR users the same way (a Users sheet row with Role = "HR").');
-}
-
-// Run ONCE (from the Apps Script editor) ONLY if migrateAddHRRole() already
-// ran on this spreadsheet before the fix above - i.e. a 'hr1' row exists
-// with a plaintext 'Password' column and no hash. Re-hashes it in place
-// with a fresh salt and forces a change on next login, same as a fixed
-// migrateAddHRRole() would have done. Safe to re-run - does nothing once
-// hr1 already has a 'Password Hash'.
-function fixPlaintextHRSeedPassword() {
-  const users = readAll(SHEETS.USERS);
-  const hr = users.find(u => u['User ID'] === 'hr1');
-  if (!hr) { Logger.log('No hr1 user found - nothing to do.'); return; }
-  if (hr['Password Hash']) { Logger.log('hr1 already has a Password Hash - nothing to do.'); return; }
-  const DEFAULT_PW = 'ChangeMe@123';
-  const salt = makeSalt();
-  updateRow(SHEETS.USERS, hr._row, {
-    'Password Hash': hashPassword(DEFAULT_PW, salt), 'Salt': salt, 'Password': '',
-    'Must Change Password': 'Yes'
-  });
-  Logger.log('hr1 password re-hashed and "Must Change Password" set to Yes. It will be forced to set a real password on next login.');
 }
 
 // P0 SAFETY GUARD (audit fix - data-loss risk): buildSheet() used to
