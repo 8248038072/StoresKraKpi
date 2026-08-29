@@ -1590,9 +1590,18 @@ async function callApi(action, params, _retried) {
   }
   if (!out.ok) {
     if (out.sessionExpired) {
-      if (!_retried && action !== 'login') {
-        await new Promise(r => setTimeout(r, 500));
-        return callApi(action, params, true);
+      // RETRY-WITH-BACKOFF (Aug 2026 hardening): a single 500ms retry wasn't
+      // always enough to outlast CacheService's cross-instance propagation
+      // lag right after login, especially on a cold-started backend
+      // instance - that left MASTERS empty (Master Data / Working Register
+      // both depend on it) even though the session was perfectly valid.
+      // _retried is now an attempt COUNTER (0,1,2,...) instead of a boolean;
+      // up to 3 retries with increasing delay before we accept the session
+      // is genuinely gone and log out.
+      const attempt = _retried || 0;
+      if (attempt < 3 && action !== 'login') {
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1))); // 500ms, 1000ms, 1500ms
+        return callApi(action, params, attempt + 1);
       }
       logout();
       throw new Error('Your session expired. Please log in again.');
@@ -4199,7 +4208,22 @@ function exportXlsx(rows, filename) {
 /* ============================================================
    MASTERS VIEW
    ============================================================ */
-function loadMastersView() {
+// BUGFIX (Master Page live-refresh, Aug 2026): this view used to render
+// straight from the session-cached MASTERS snapshot taken once at login
+// (enterApp() -> getMasters()), so Staff/Section/Activity/Workflow rows
+// added or edited directly on the Google Sheet never showed up here until
+// the user logged out and back in. Mirrors the same fix already applied to
+// Working Register / Edit Workflow (getWorkflowsFresh()): re-fetch getMasters()
+// fresh every time this page is opened and refresh the global MASTERS cache
+// before rendering, so every other screen that reads MASTERS also benefits.
+async function loadMastersView() {
+  try {
+    MASTERS = await callApi('getMasters', {});
+  } catch (e) {
+    toast(e.message);
+    // fall through and render whatever MASTERS we already have, rather than
+    // leaving the page blank on a transient network error
+  }
   document.querySelector('#staffTable tbody').innerHTML = MASTERS.staff.map(s => `
     <tr><td>${escapeHtml(s['Staff ID'])}</td><td>${escapeHtml(s['Staff Name'])}</td><td>${escapeHtml(s['Designation'])}</td><td>${escapeHtml(s['Section'])}</td><td>${escapeHtml(s['Status'])}</td>
     <td><button class="btn btn-outline btn-sm" data-action="openStaffForm" data-id="${escapeHtml(s['Staff ID'])}">${T('editBtn')}</button></td></tr>
