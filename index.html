@@ -1021,6 +1021,9 @@ let SESSION = null;   // {userId, staffId, staffName, role}
    ============================================================ */
 const I18N = {
   appTitle: { en: "Stores KPI &amp; Appraisal", ta: "ஸ்டோர்ஸ் KPI &amp; மதிப்பீடு" },
+  mastersLoadFailedTitle: { en: "Could not load Staff / Activity / Workflow data", ta: "பணியாளர் / செயல்பாடு / வொர்க்ஃப்ளோ தரவு ஏற்ற முடியவில்லை" },
+  mastersLoadFailedBody: { en: "The Working Register and other screens need this Master Data to work, and it did not load completely. This is usually a temporary connection hiccup - please try again.", ta: "Working Register மற்றும் மற்ற திரைகள் வேலை செய்ய இந்த Master Data தேவை, அது முழுமையாக ஏற்றப்படவில்லை. இது பொதுவாக ஒரு தற்காலிக இணைப்பு பிரச்சனை - மீண்டும் முயற்சிக்கவும்." },
+  retryLoading: { en: "Retry", ta: "மீண்டும் முயற்சி" },
   companyLine: { en: "Sri Narasu's Coffee Company Pvt Ltd &mdash; Stores Department", ta: "ஸ்ரீ நரசு'ஸ் காபி கம்பெனி பிரைவேட் லிமிடெட் &mdash; ஸ்டோர்ஸ் துறை" },
   userId: { en: "User ID", ta: "பயனர் ஐடி" },
   password: { en: "Password", ta: "கடவுச்சொல்" },
@@ -1794,35 +1797,89 @@ function showView(id) {
 /* ============================================================
    APP BOOT
    ============================================================ */
+// Fetches getMasters(), retrying a few times (with backoff) if the call
+// throws OR if it comes back "ok" but missing Staff/Activity/Workflow rows
+// - a cold-started Apps Script instance or a momentary Sheets read glitch
+// can produce either symptom on the very first attempt right after login.
+// Returns true only once MASTERS looks complete; false if every attempt
+// failed, so the caller can stop instead of silently building the app on
+// top of empty master data.
+async function loadMastersData(maxAttempts) {
+  maxAttempts = maxAttempts || 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const m = await callApi('getMasters', {});
+      const complete = m && (m.staff && m.staff.length) &&
+        (m.activities && m.activities.length) && (m.workflows && m.workflows.length);
+      if (complete) {
+        MASTERS = m;
+        // Backend (HR_POLICY in code.gs) is the single source of truth for
+        // these lists (audit item 18) - overwrite the hardcoded fallbacks
+        // declared above as soon as the real data arrives.
+        if (MASTERS.recognitionTypes) RECOGNITION_TYPES = MASTERS.recognitionTypes;
+        if (MASTERS.memoTypes) MEMO_TYPES = MASTERS.memoTypes;
+        if (MASTERS.memoCategories) MEMO_CATEGORIES = MASTERS.memoCategories;
+        if (MASTERS.memoDecisionOptions) MEMO_DECISIONS = MASTERS.memoDecisionOptions;
+        if (MASTERS.teamWorkflowIds) TEAM_WORKFLOW_IDS = MASTERS.teamWorkflowIds;
+        return true;
+      }
+      // Came back ok but incomplete (e.g. empty Staff/Activity/Workflow) -
+      // keep MASTERS as-is and retry rather than accepting a half-empty set.
+    } catch (e) {
+      // callApi() already retries/logs-out internally for a genuine
+      // session expiry - if that already happened, SESSION is now null and
+      // the login screen is already back up, so there's nothing left to
+      // retry here.
+      if (!SESSION) return false;
+      if (attempt === maxAttempts) toast(e.message);
+    }
+    if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 700 * attempt));
+  }
+  return false;
+}
+
+// Blocking screen shown when Master Data (Staff/Activity/Workflow) could
+// not be loaded after retries - deliberately replaces the app shell rather
+// than leaving a half-built nav/Working Register on screen with nothing to
+// select. "Reload" re-runs the whole boot sequence (session is still saved
+// in sessionStorage) rather than trying to patch the partially-built DOM.
+function showMastersLoadError() {
+  document.getElementById('app').innerHTML =
+    '<div style="margin:auto;text-align:center;max-width:440px;padding:32px 24px;">' +
+    '<div style="font-size:32px;margin-bottom:10px;">⚠️</div>' +
+    '<h2 style="margin:0 0 10px;font-size:17px;">' + T('mastersLoadFailedTitle') + '</h2>' +
+    '<p style="font-size:13px;color:#555;margin-bottom:18px;">' + T('mastersLoadFailedBody') + '</p>' +
+    '<button class="btn" onclick="location.reload()">' + T('retryLoading') + '</button>' +
+    '</div>';
+}
+
 async function enterApp() {
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
   document.getElementById('whoLabel').textContent = SESSION.staffName + ' · ' + SESSION.role;
-  try {
-    MASTERS = await callApi('getMasters', {});
-    // Backend (HR_POLICY in code.gs) is the single source of truth for
-    // these three lists (audit item 18) - overwrite the hardcoded
-    // fallbacks declared above as soon as the real data arrives.
-    if (MASTERS.recognitionTypes) RECOGNITION_TYPES = MASTERS.recognitionTypes;
-    if (MASTERS.memoTypes) MEMO_TYPES = MASTERS.memoTypes;
-    if (MASTERS.memoCategories) MEMO_CATEGORIES = MASTERS.memoCategories;
-    if (MASTERS.memoDecisionOptions) MEMO_DECISIONS = MASTERS.memoDecisionOptions;
-    if (MASTERS.teamWorkflowIds) TEAM_WORKFLOW_IDS = MASTERS.teamWorkflowIds;
-  } catch (e) {
-    // BUGFIX: if the saved session token had already expired on the server
-    // (e.g. reopening the app after the idle timeout), callApi() has
-    // already called logout() internally - it hid #app, showed the login
-    // screen again, and set SESSION = null. Previously this catch block
-    // only toasted the error and fell through to buildNav(), which then
-    // ran against a null SESSION and an empty MASTERS ({staff:[],
-    // activities:[], workflows:[]}) - the login screen would flash back
-    // but the app underneath was left built with no Activities/Staff in
-    // the Working Register, Masters, etc. dropdowns. Stop here instead:
-    // if SESSION is gone, logout() already put the UI in the right state,
-    // so there's nothing left for enterApp() to finish setting up.
-    toast(e.message);
-    if (!SESSION) return;
+
+  // BUGFIX (Aug 2026): getMasters() failures used to be handled with a
+  // single attempt + a catch block that only bailed out if SESSION had
+  // been cleared (i.e. a genuine session-expiry, which callApi() itself
+  // already retries/logs-out for). Any OTHER failure - a transient
+  // network blip, a momentary Apps Script quota/lock hiccup, or the
+  // sheet(s) behind getMasters() returning fewer rows than expected on a
+  // cold-started instance - just got toasted and then fell straight
+  // through to buildNav(), which built the whole app UI on top of a
+  // stale/EMPTY MASTERS ({staff:[], activities:[], workflows:[]}).
+  // Nothing looked "broken" (no error stayed on screen), but the Working
+  // Register's Activity/Workflow/Staff dropdowns - and Masters, Reports,
+  // etc. - were silently empty until a manual page reload. loadMastersData()
+  // below now retries a few times AND verifies the response actually has
+  // Staff/Activity/Workflow rows before accepting it; if it still can't
+  // get a complete Masters set, we stop here and show a blocking retry
+  // screen instead of quietly continuing with a half-built app.
+  const ok = await loadMastersData();
+  if (!ok) {
+    showMastersLoadError();
+    return;
   }
+
   buildNav();
   document.getElementById('regDate').valueAsDate = new Date();
   document.getElementById('attDate').valueAsDate = new Date();
