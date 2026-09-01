@@ -8,7 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Tamil:wght@400;600;700&display=swap" rel="stylesheet">
-<style>7
+<style>
 :root{
   --coffee-900:#3B2415; --coffee-700:#6F4E37; --coffee-500:#9C6B45;
   --coffee-300:#C8A27A; --cream-100:#FAF3E7; --cream-50:#FFFDF9;
@@ -236,6 +236,37 @@ canvas{max-height:260px;}
 @media(max-width:760px){
   .tt-cards{display:block;}
 }
+
+/* ---------- BACKGROUND COLOUR ENHANCEMENT FIX ---------- */
+html,body{
+  min-height:100%;
+  background:var(--cream-100);
+}
+main.content{
+  background:var(--cream-100);
+  min-height:calc(100vh - 60px);
+  padding:18px;
+}
+.view{
+  background:var(--cream-50);
+  border-radius:12px;
+  padding:15px;
+  min-height:100%;
+}
+.card{
+  background:#ffffff;
+  border-radius:12px;
+  box-shadow:var(--shadow);
+}
+.table-wrap{
+  background:#ffffff;
+  border-radius:10px;
+}
+@media(max-width:768px){
+  main.content{padding:10px;}
+  .view{padding:10px;}
+}
+
 </style>
 </head>
 <body>
