@@ -8,7 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Tamil:wght@400;600;700&display=swap" rel="stylesheet">
-<style>
+<style>7
 :root{
   --coffee-900:#3B2415; --coffee-700:#6F4E37; --coffee-500:#9C6B45;
   --coffee-300:#C8A27A; --cream-100:#FAF3E7; --cream-50:#FFFDF9;
@@ -996,6 +996,28 @@ canvas{max-height:260px;}
 <div class="toast" id="toast"></div>
 
 <script>
+/* ============================================================
+   TIMEZONE-SAFE LOCAL DATE STRING (Sep 2026 fix)
+   ------------------------------------------------------------
+   new Date(y, m, 1).toISOString().slice(0, 10) is WRONG for any
+   timezone ahead of UTC (e.g. IST, UTC+5:30): constructing a Date
+   at local midnight and then calling toISOString() converts that
+   instant BACK to UTC, which lands on the PREVIOUS calendar day
+   (e.g. "1 Sep 00:00 IST" -> "31 Aug 18:30 UTC" -> slice(0,10)
+   gives "2026-08-31", not "2026-09-01"). This silently sent the
+   wrong "from" date to the backend for MTD ranges - the Dashboard
+   "Approved Entries (MTD)" card showing 41 despite September
+   having zero approvals was caused by this, not by the backend
+   date-range logic (which was already correct). Use localDateStr()
+   anywhere a JS Date needs to become a 'yyyy-MM-dd' string for the
+   backend or a <input type="date"> value - it reads the Date's own
+   local y/m/d fields directly and never round-trips through UTC.
+   ============================================================ */
+function localDateStr(d) {
+  const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
 /* ============================================================
    CONFIG — paste your deployed Apps Script Web App URL here
    ============================================================ */
@@ -2134,8 +2156,8 @@ window.addEventListener('DOMContentLoaded', () => {
    ============================================================ */
 async function loadDashboard() {
   const now = new Date();
-  const from = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-  const to = now.toISOString().slice(0, 10);
+  const from = localDateStr(new Date(now.getFullYear(), now.getMonth(), 1));
+  const to = localDateStr(now);
   const p = { from, to };
   if (SESSION.role === 'Staff') p.staffId = SESSION.staffId;
   let d;
@@ -2821,7 +2843,7 @@ async function markAttendance() {
 
 async function loadAttendance() {
   if (!document.getElementById('attDate').value) {
-    document.getElementById('attDate').value = new Date().toISOString().slice(0, 10);
+    document.getElementById('attDate').value = localDateStr(new Date());
   }
   const p = SESSION.role === 'Staff' ? { staffId: SESSION.staffId } : {};
   let rows;
@@ -3097,8 +3119,8 @@ function scoreCardHtml(d) {
 function defaultRangeIfEmpty(fromId, toId) {
   if (document.getElementById(fromId).value && document.getElementById(toId).value) return;
   const now = new Date();
-  document.getElementById(fromId).value = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-  document.getElementById(toId).value = now.toISOString().slice(0, 10);
+  document.getElementById(fromId).value = localDateStr(new Date(now.getFullYear(), now.getMonth(), 1));
+  document.getElementById(toId).value = localDateStr(now);
 }
 
 async function loadMyScore() {
@@ -4312,7 +4334,7 @@ function openStaffForm(staffId) {
   document.getElementById('sfDesignation').value = s ? s['Designation'] : '';
   document.getElementById('sfSection').value = s ? s['Section'] : '';
   document.getElementById('sfReportingManager').value = s ? s['Reporting Manager'] : '';
-  document.getElementById('sfDoj').value = s && s['Date of Joining'] ? new Date(s['Date of Joining']).toISOString().slice(0, 10) : '';
+  document.getElementById('sfDoj').value = s && s['Date of Joining'] ? localDateStr(new Date(s['Date of Joining'])) : '';
   document.getElementById('sfStatus').value = s ? (s['Status'] || 'Active') : 'Active';
   card.style.display = 'block';
   card.scrollIntoView({ behavior: 'smooth', block: 'center' });
