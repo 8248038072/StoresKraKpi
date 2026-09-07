@@ -947,6 +947,15 @@ main.content{
         </div>
 
         <div class="card">
+          <!-- Report letterhead (Sep 2026): Company name + Department heading,
+               plus which Staff/Section this run is scoped to and when it was
+               prepared. Hidden until the first successful runReport(); same
+               content is echoed into printReport()'s output. -->
+          <div id="repLetterhead" style="display:none;margin-bottom:12px;padding:10px 12px;background:var(--cream-100);border-radius:10px;">
+            <div style="font-size:15px;font-weight:700;color:var(--coffee-900)" id="repLhCompany"></div>
+            <div style="font-size:12.5px;color:var(--coffee-700);margin-top:2px;" id="repLhDept"></div>
+            <div style="font-size:11.5px;color:var(--coffee-500);margin-top:4px;" id="repLhMeta"></div>
+          </div>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
             <h3 style="font-size:14px;color:var(--coffee-700)" id="repResultsTitle" data-i18n="results">Results</h3>
             <div style="display:flex;gap:8px;">
@@ -1412,12 +1421,20 @@ const I18N = {
   all: { en: "All", ta: "அனைத்தும்" },
   exportCsv: { en: "Export CSV", ta: "CSV ஏற்றுமதி" },
   printReport: { en: "Print", ta: "அச்சிடு" },
+  // ---- Report letterhead (Sep 2026: Company/Department heading + staff
+  // name + prepared-on timestamp shown on the Reports screen and on Print) ----
+  lhCompanyName: { en: "Sri Narasu's Coffee Company Pvt Ltd", ta: "ஸ்ரீ நரசு'ஸ் காபி கம்பெனி பிரைவேட் லிமிடெட்" },
+  lhDepartmentLabel: { en: "Department", ta: "துறை" },
+  lhDepartmentDefault: { en: "Stores Department", ta: "ஸ்டோர்ஸ் துறை" },
+  lhPreparedOn: { en: "Report Prepared On", ta: "அறிக்கை தயாரிக்கப்பட்ட நேரம்" },
   statusDraft: { en: "Draft", ta: "வரைவு" },
   statusSubmitted: { en: "Submitted", ta: "சமர்ப்பிக்கப்பட்டது" },
   statusApproved: { en: "Approved", ta: "ஒப்புதல் அளிக்கப்பட்டது" },
   statusRejected: { en: "Rejected", ta: "நிராகரிக்கப்பட்டது" },
   repStaffPerf: { en: "📊 Staff Performance", ta: "📊 பணியாளர் செயல்திறன்" },
   repActivityPerf: { en: "📈 Activity Performance", ta: "📈 செயல்பாடு செயல்திறன்" },
+  repActivityStaffPerf: { en: "📈 Activity - Staff Performance", ta: "📈 செயல்பாடு - பணியாளர் செயல்திறன்" },
+  repStaffComparison: { en: "🏆 Staff Comparison", ta: "🏆 பணியாளர் ஒப்பீடு" },
   repKpiWorkflowPerf: { en: "🎯 KPI / Workflow Performance", ta: "🎯 KPI / பணிப்பாய்வு செயல்திறன்" },
   repSectionPerf: { en: "🏢 Section Performance", ta: "🏢 பிரிவு செயல்திறன்" },
   repDateRangePerf: { en: "📅 Date Range Performance", ta: "📅 தேதி வரம்பு செயல்திறன்" },
@@ -1432,6 +1449,9 @@ const I18N = {
   colKpiScore: { en: "KPI Score", ta: "KPI மதிப்பெண்" },
   colMaxScore: { en: "Max Score", ta: "அதிகபட்ச மதிப்பெண்" },
   colOverallPct: { en: "Overall %", ta: "மொத்த %" },
+  colRank: { en: "Rank", ta: "தரவரிசை" },
+  colActivitiesCount: { en: "Activities Count", ta: "செயல்பாடுகள் எண்ணிக்கை" },
+  colActivitiesNames: { en: "Activities (Names)", ta: "செயல்பாடுகள் (பெயர்கள்)" },
   colRating: { en: "Rating", ta: "மதிப்பீடு" },
   colStaffId: { en: "Staff ID", ta: "பணியாளர் ID" },
   colDesignation: { en: "Designation", ta: "பதவி" },
@@ -4041,9 +4061,42 @@ const REPORT_DEFS = {
       { key: 'maxScore', labelKey: 'colMaxScore', fmt: 'num' }, { key: 'overallPct', labelKey: 'colOverallPct', fmt: 'pct' }
     ], totals: ['monthlyTarget', 'approvedActual', 'balance', 'kpiScore', 'maxScore']
   },
+  // STAFF COMPARISON REPORT (Sep 2026): one row per staff, all staff
+  // side-by-side, sorted by KPI Score (highest first) with a Rank column -
+  // backend getStaffComparisonReport() already sorts/ranks this way.
+  // Monthly Target intentionally not shown here (not a per-staff value -
+  // see the caveat comment on getActivityStaffPerformanceReport in Code.gs).
+  staffComparison: {
+    action: 'getStaffComparisonReport', labelKey: 'repStaffComparison', filters: ['date', 'section', 'staff'],
+    columns: [
+      { key: 'rank', labelKey: 'colRank' }, { key: 'staffId', labelKey: 'colStaffId' }, { key: 'staffName', labelKey: 'staff' },
+      { key: 'section', labelKey: 'section' }, { key: 'activitiesCount', labelKey: 'colActivitiesCount' },
+      { key: 'activitiesNames', labelKey: 'colActivitiesNames' },
+      { key: 'kpiScore', labelKey: 'colKpiScore', fmt: 'num' }, { key: 'maxScore', labelKey: 'colMaxScore', fmt: 'num' },
+      { key: 'overallPct', labelKey: 'colOverallPct', fmt: 'pct' }
+    ], totals: ['kpiScore', 'maxScore']
+  },
+  // ACTIVITY-STAFF PERFORMANCE REPORT (Sep 2026): one row per Staff x
+  // Activity, Activity-first (all staff grouped under each Activity) -
+  // backend getActivityStaffPerformanceReport() already sorts this way and
+  // excludes Attendance/ACT009. Monthly Target/Balance carry the same
+  // "full target repeated per staff on a shared job" caveat as the
+  // staff-filtered KPI/Workflow Performance report - see that function's
+  // comment in Code.gs.
+  activityStaffPerf: {
+    action: 'getActivityStaffPerformanceReport', labelKey: 'repActivityStaffPerf', filters: ['date', 'section', 'staff', 'activity'],
+    columns: [
+      { key: 'activityName', labelKey: 'activity' }, { key: 'staffId', labelKey: 'colStaffId' }, { key: 'staffName', labelKey: 'staff' },
+      { key: 'section', labelKey: 'section' }, { key: 'monthlyTarget', labelKey: 'colMonthlyTarget', fmt: 'num' },
+      { key: 'approvedActual', labelKey: 'colApprovedActual', fmt: 'num' }, { key: 'balance', labelKey: 'colBalance', fmt: 'num' },
+      { key: 'achievementPct', labelKey: 'colAchievementPct', fmt: 'pct' }, { key: 'kpiScore', labelKey: 'colKpiScore', fmt: 'num' },
+      { key: 'maxScore', labelKey: 'colMaxScore', fmt: 'num' }, { key: 'overallPct', labelKey: 'colOverallPct', fmt: 'pct' }
+    ], totals: ['kpiScore', 'maxScore']
+  },
   kpiWorkflowPerf: {
     action: 'getKPIWorkflowPerformanceReport', labelKey: 'repKpiWorkflowPerf', filters: ['date', 'section', 'staff', 'activity', 'workflow'],
     columns: [
+      { key: 'staffName', labelKey: 'staff' },
       { key: 'activityName', labelKey: 'activity' }, { key: 'workflowName', labelKey: 'workflow' },
       { key: 'kpiName', labelKey: 'colKpiName' }, { key: 'section', labelKey: 'section' },
       { key: 'monthlyTarget', labelKey: 'colMonthlyTarget', fmt: 'num' }, { key: 'approvedActual', labelKey: 'colApprovedActual', fmt: 'num' },
@@ -4133,6 +4186,40 @@ const REPORT_DEFS = {
 let currentReportId = 'staffPerf';
 let lastReportRows = [];
 let lastReportColumns = [];
+let lastReportMeta = null;
+
+// Report letterhead (Sep 2026): Company name + Department heading, plus
+// which Section/Staff this run is scoped to and when it was prepared.
+// Staff name is read from the Staff filter dropdown's selected option text
+// (same MASTERS.staff-backed list used everywhere else in Reports) rather
+// than from the row data itself, since reports like KPI/Workflow
+// Performance are workflow-aggregated (not one row per staff) and only
+// carry a staffName field when filtered to a single staff. Recomputed on
+// every successful runReport() so "Prepared On" reflects the actual run
+// time, and reused as-is by printReport() so the printed copy matches
+// what's shown on screen.
+function updateReportLetterhead(def) {
+  const staffSel = document.getElementById('repStaff');
+  const staffName = (def.filters.includes('staff') && staffSel.value && staffSel.selectedOptions[0])
+    ? staffSel.selectedOptions[0].textContent : '';
+  const sectionSel = document.getElementById('repSection');
+  const sectionName = (def.filters.includes('section') && sectionSel.value) ? sectionSel.value : '';
+  const metaParts = [];
+  if (sectionName) metaParts.push(`${T('section')}: ${sectionName}`);
+  if (staffName) metaParts.push(`${T('staff')}: ${staffName}`);
+  metaParts.push(`${T('lhPreparedOn')}: ${new Date().toLocaleString()}`);
+
+  lastReportMeta = {
+    company: T('lhCompanyName'),
+    dept: `${T('lhDepartmentLabel')}: ${T('lhDepartmentDefault')}`,
+    meta: metaParts.join('  |  ')
+  };
+
+  document.getElementById('repLetterhead').style.display = '';
+  document.getElementById('repLhCompany').textContent = lastReportMeta.company;
+  document.getElementById('repLhDept').textContent = lastReportMeta.dept;
+  document.getElementById('repLhMeta').textContent = lastReportMeta.meta;
+}
 
 function repStripTags(s) { return String(s == null ? '' : s).replace(/<[^>]+>/g, ''); }
 
@@ -4163,6 +4250,7 @@ function selectReportType(id) {
   document.querySelector('#reportTable tbody').innerHTML = '';
   document.getElementById('repSummaryCards').style.display = 'none';
   document.getElementById('repResultsTitle').textContent = T(REPORT_DEFS[id].labelKey);
+  document.getElementById('repLetterhead').style.display = 'none';
 }
 
 function applyReportFilterVisibility() {
@@ -4225,6 +4313,11 @@ async function runReport() {
     tbody.innerHTML = `<tr><td colspan="${def.columns.length}" class="empty">${escapeHtml(e.message)}</td></tr>`;
     return;
   }
+
+  // Show the letterhead (Company/Department heading, Staff/Section scope,
+  // Prepared On timestamp) once the report has actually run - including
+  // when it comes back with zero rows, so it's clear what was searched.
+  updateReportLetterhead(def);
 
   let rows = data;
   if (def.isSummaryPlusRows) { renderReportSummaryCards(data.summary); rows = data.rows; }
@@ -4295,13 +4388,23 @@ function printReport() {
   const title = T(REPORT_DEFS[currentReportId].labelKey);
   const headHtml = lastReportColumns.map(c => `<th>${T(c.labelKey)}</th>`).join('');
   const bodyHtml = lastReportRows.map(r => '<tr>' + lastReportColumns.map(c => `<td>${repStripTags(repFmt(r[c.key], c.fmt))}</td>`).join('') + '</tr>').join('');
+  // Letterhead (Company/Department + Staff/Section scope + Prepared On) -
+  // same lastReportMeta populated by updateReportLetterhead() during
+  // runReport(), so the printed copy always matches what's on screen.
+  // Falls back to a fresh company/department-only line in the unlikely
+  // case Print is somehow reached before that ran.
+  const lh = lastReportMeta || { company: T('lhCompanyName'), dept: `${T('lhDepartmentLabel')}: ${T('lhDepartmentDefault')}`, meta: `${T('lhPreparedOn')}: ${new Date().toLocaleString()}` };
   w.document.write(`<html><head><title>${title}</title><style>
     body{font-family:Arial,sans-serif;padding:20px;} h2{margin-bottom:4px;}
+    .lhCompany{font-size:16px;font-weight:700;margin-bottom:2px;} .lhDept{font-size:13px;margin-bottom:2px;} .lhMeta{font-size:11px;color:#555;margin-bottom:10px;}
     table{border-collapse:collapse;width:100%;font-size:12px;} th,td{border:1px solid #999;padding:5px 7px;text-align:left;}
     th{background:#eee;}
   </style></head><body>
+    <div class="lhCompany">${escapeHtml(lh.company)}</div>
+    <div class="lhDept">${escapeHtml(lh.dept)}</div>
     <h2>${title}</h2>
     <p>${document.getElementById('repFrom').value} to ${document.getElementById('repTo').value}</p>
+    <div class="lhMeta">${escapeHtml(lh.meta)}</div>
     <table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>
   </body></html>`);
   w.document.close();
