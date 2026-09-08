@@ -1454,6 +1454,7 @@ const I18N = {
   colActivitiesNames: { en: "Activities (Names)", ta: "செயல்பாடுகள் (பெயர்கள்)" },
   colRating: { en: "Rating", ta: "மதிப்பீடு" },
   colStaffId: { en: "Staff ID", ta: "பணியாளர் ID" },
+  colActualCount: { en: "Actual Count", ta: "நிகழ் எண்ணிக்கை" },
   colDesignation: { en: "Designation", ta: "பதவி" },
   colMonth: { en: "Month", ta: "மாதம்" },
   colKpiName: { en: "KPI", ta: "KPI" },
@@ -4061,20 +4062,22 @@ const REPORT_DEFS = {
       { key: 'maxScore', labelKey: 'colMaxScore', fmt: 'num' }, { key: 'overallPct', labelKey: 'colOverallPct', fmt: 'pct' }
     ], totals: ['monthlyTarget', 'approvedActual', 'balance', 'kpiScore', 'maxScore']
   },
-  // STAFF COMPARISON REPORT (Sep 2026): one row per staff, all staff
-  // side-by-side, sorted by KPI Score (highest first) with a Rank column -
-  // backend getStaffComparisonReport() already sorts/ranks this way.
-  // Monthly Target intentionally not shown here (not a per-staff value -
-  // see the caveat comment on getActivityStaffPerformanceReport in Code.gs).
+  // STAFF COMPARISON REPORT - REPLACED (Sep 2026 v2, Manager-confirmed):
+  // the old KPI-Score ranking layout (Rank/Activities Count/Activities
+  // Names/KPI Score/Max Score/Overall %) is REMOVED. Now a simple Staff x
+  // Activity x Workflow PARTICIPATION COUNT report - one row per Workflow
+  // a staff actually logged an Approved entry against, showing only the
+  // physical Actual Count (no Target/Balance/Achievement %/KPI Score/Max
+  // Score anywhere) - matches backend getStaffComparisonReport() v2 in
+  // Code.gs. 'activity' filter added (was date/section/staff only) so a
+  // Manager can narrow to one Activity same as Activity-Staff Performance.
   staffComparison: {
-    action: 'getStaffComparisonReport', labelKey: 'repStaffComparison', filters: ['date', 'section', 'staff'],
+    action: 'getStaffComparisonReport', labelKey: 'repStaffComparison', filters: ['date', 'section', 'staff', 'activity'],
     columns: [
-      { key: 'rank', labelKey: 'colRank' }, { key: 'staffId', labelKey: 'colStaffId' }, { key: 'staffName', labelKey: 'staff' },
-      { key: 'section', labelKey: 'section' }, { key: 'activitiesCount', labelKey: 'colActivitiesCount' },
-      { key: 'activitiesNames', labelKey: 'colActivitiesNames' },
-      { key: 'kpiScore', labelKey: 'colKpiScore', fmt: 'num' }, { key: 'maxScore', labelKey: 'colMaxScore', fmt: 'num' },
-      { key: 'overallPct', labelKey: 'colOverallPct', fmt: 'pct' }
-    ], totals: ['kpiScore', 'maxScore']
+      { key: 'staffId', labelKey: 'colStaffId' }, { key: 'staffName', labelKey: 'staff' },
+      { key: 'section', labelKey: 'section' }, { key: 'activityName', labelKey: 'activity' },
+      { key: 'workflowName', labelKey: 'workflow' }, { key: 'actualCount', labelKey: 'colActualCount', fmt: 'num' }
+    ], totals: ['actualCount']
   },
   // ACTIVITY-STAFF PERFORMANCE REPORT (Sep 2026): one row per Staff x
   // Activity, Activity-first (all staff grouped under each Activity) -
