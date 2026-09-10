@@ -65,7 +65,19 @@ const ATTENDANCE_STATUS_VALUES = ['Present', 'Absent', 'Half Day', 'Permission',
 // Workflow Master fields editable ONLY through the Edit Workflow screen
 // (api.updateWorkflow) or the onEdit guardrail below - never meant to be
 // hand-edited in the sheet without going through one of those two paths.
-const EDITABLE_WORKFLOW_FIELDS = ['Target', 'Weightage %', 'Max Score', 'Expected Output', 'Status'];
+const EDITABLE_WORKFLOW_FIELDS = ['Target', 'Weightage %', 'Max Score', 'Expected Output', 'Status', 'Sections'];
+// SECTIONS FIELD (Sep 2026 - Staff Comparison report v3): comma-separated
+// Section IDs this Workflow is configured for (e.g. "SEC01,SEC02"), or the
+// literal string 'All' to apply to every Section. Manager-editable via the
+// same Edit Workflow screen/updateWorkflow() as Target/Weightage %/Status.
+// Used ONLY to compute Total Activities/Total Workflows per Section for the
+// Staff Comparison report (see _sectionTotals()) - deliberately kept OUT of
+// every Stores KPI Max Score / denominator calculation, which stays on the
+// separate, already-decided company-wide Option B design
+// (computeStaffFixedActiveWorkflowMaxScore_ / STORES_KPI_EXCLUDED_ACTIVITY_IDS)
+// and must not be touched by this field without a fresh HR sign-off.
+// Blank (not yet configured) means the workflow counts toward NO Section's
+// totals until a Manager sets it - see migrateAddWorkflowSectionsField().
 
 // ============================================================
 // HR KPI APPRAISAL POLICY (edit these to match your real company policy)
@@ -895,6 +907,15 @@ const STAFF_SCOPED_READ_ACTIONS = {
   getKPIWorkflowPerformanceReport: true, getSectionPerformanceReport: true,
   getDateRangePerformanceReport: true, getMonthlyTargetAchievementReport: true,
   getStaffAppraisalReport: true, getApprovalWorkingRegisterReport: true,
+  // ACTIVITY-STAFF PERFORMANCE REPORT (Sep 2026): one row per Staff x
+  // Activity (Attendance/ACT009 excluded, same as every report above) -
+  // same force-set-staffId rule as the other 8 Reports actions in this
+  // list, so a Staff user can only ever see their own rows.
+  getActivityStaffPerformanceReport: true,
+  // STAFF COMPARISON REPORT (Sep 2026): one row per staff, all staff
+  // side-by-side for the period (Activities Count + Names, KPI Score) -
+  // same force-set-staffId rule applies.
+  getStaffComparisonReport: true,
   // AUTOMATIC TRAINING (Aug 2026): a Staff user may only ever see their own
   // Training Register history - same force-set-staffId rule as every other
   // read action in this list (item 15 of the spec: "Staff can view only
@@ -1177,6 +1198,35 @@ function startOfDay(dateVal) {
   const d = new Date(dateVal);
   d.setHours(0, 0, 0, 0);
   return d;
+}
+
+// TIMEZONE-SAFE DATE-RANGE FIX (Sep 2026): every "is this row's Date inside
+// from..to" check used to compare raw Date OBJECTS (epoch instants). Sheets
+// stores a Date cell's epoch relative to the SPREADSHEET's locale timezone,
+// while a bound built via `new Date(y, m, d)` in code is evaluated in the
+// APPS SCRIPT PROJECT's timezone. When those two timezones differ (a common,
+// easy-to-miss mismatch between Spreadsheet > Settings > Locale and the
+// script's appsscript.json timeZone), the epoch instants can land on the
+// wrong side of midnight - e.g. an Approved row whose Date cell displays
+// "31-08-2026" was still being counted inside a "from = 1 Sep 00:00" range,
+// which is exactly the Dashboard "41 Approved Entries" bug this fixes.
+// toDateKey_() sidesteps the whole problem: it renders BOTH the row's Date
+// and the range boundary to a plain 'yyyy-MM-dd' calendar-day string in the
+// SAME timezone (Session.getScriptTimeZone()), then compares those strings.
+// Two calendar-day strings compare correctly with plain >=/<= (lexical order
+// matches chronological order for zero-padded ISO dates), with no epoch/
+// timezone ambiguity left at all. Used everywhere a Date range filter is
+// applied (Dashboard, Appraisal, Reports, Target Status, Attendance).
+function toDateKey_(dateVal) {
+  if (!dateVal) return '';
+  return Utilities.formatDate(new Date(dateVal), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+function inDateRangeKey_(dateVal, fromVal, toVal) {
+  const k = toDateKey_(dateVal);
+  if (!k) return false;
+  if (fromVal && k < toDateKey_(fromVal)) return false;
+  if (toVal && k > toDateKey_(toVal)) return false;
+  return true;
 }
 
 function logAudit(userId, action, details) {
@@ -1759,10 +1809,8 @@ function _validateMonthlyTargetValue(raw) {
 // the same length, to power the "uptrend"/"downtrend" arrow on the card.
 // See getDashboard() for the FIX history this logic was carried over from.
 function computeDashboardKpiForRange_(from, to, staffId) {
-  const approvedInRange = readAll(SHEETS.REGISTER).filter(r => {
-    const d = new Date(r['Date']);
-    return d >= from && d <= to && r['Approval Status'] === 'Approved';
-  });
+  const approvedInRange = readAll(SHEETS.REGISTER).filter(r =>
+    inDateRangeKey_(r['Date'], from, to) && r['Approval Status'] === 'Approved');
   let rows = approvedInRange;
   if (staffId) rows = rows.filter(r => r['Staff ID'] === staffId);
 
@@ -2866,8 +2914,8 @@ const api = {
     const approvedAll = all.filter(r => r['Approval Status'] === 'Approved');
     let rows = all;
     if (p.staffId) rows = rows.filter(r => r['Staff ID'] === p.staffId);
-    if (p.from) rows = rows.filter(r => new Date(r['Date']) >= startOfDay(p.from));
-    if (p.to) rows = rows.filter(r => new Date(r['Date']) <= endOfDay(p.to));
+    if (p.from) rows = rows.filter(r => inDateRangeKey_(r['Date'], p.from, null));
+    if (p.to) rows = rows.filter(r => inDateRangeKey_(r['Date'], null, p.to));
     if (p.status) rows = rows.filter(r => r['Approval Status'] === p.status);
     return withTeamSplit(rows, approvedAll);
   },
@@ -3051,8 +3099,8 @@ const api = {
   getAttendance: function (p) {
     let rows = readAll(SHEETS.ATTENDANCE);
     if (p.staffId) rows = rows.filter(r => r['Staff ID'] === p.staffId);
-    if (p.from) rows = rows.filter(r => new Date(r['Date']) >= startOfDay(p.from));
-    if (p.to) rows = rows.filter(r => new Date(r['Date']) <= endOfDay(p.to));
+    if (p.from) rows = rows.filter(r => inDateRangeKey_(r['Date'], p.from, null));
+    if (p.to) rows = rows.filter(r => inDateRangeKey_(r['Date'], null, p.to));
     return rows;
   },
 
@@ -3207,12 +3255,9 @@ const api = {
     // Appraisal % = Dashboard % = Stores KPI % = My Score % = HR Final
     // Score's Stores KPI input, for the same Staff/period, with no second
     // formula anywhere.
-    const approvedInRange = readAll(SHEETS.REGISTER).filter(r => {
-      const d = new Date(r['Date']);
-      const inRange = (!p.from || d >= startOfDay(p.from)) && (!p.to || d <= endOfDay(p.to));
-      return inRange && r['Approval Status'] === 'Approved' &&
-        STORES_KPI_EXCLUDED_ACTIVITY_IDS.indexOf(r['Activity ID']) === -1;
-    });
+    const approvedInRange = readAll(SHEETS.REGISTER).filter(r =>
+      inDateRangeKey_(r['Date'], p.from, p.to) && r['Approval Status'] === 'Approved' &&
+      STORES_KPI_EXCLUDED_ACTIVITY_IDS.indexOf(r['Activity ID']) === -1);
     const staffMaster = readAll(SHEETS.STAFF);
     const workflows = readAll(SHEETS.WORKFLOW);
     const monthlyTargets = readAll(SHEETS.TARGETS);
@@ -3295,12 +3340,8 @@ const api = {
     const staff = readAll(SHEETS.STAFF).find(s => s['Staff ID'] === staffId);
     if (!staff) throw new Error('Staff not found: ' + staffId);
 
-    const from = p.from ? startOfDay(p.from) : null;
-    const to = p.to ? endOfDay(p.to) : null;
-    const allInRange = readAll(SHEETS.REGISTER).filter(r => {
-      const d = new Date(r['Date']);
-      return (!from || d >= from) && (!to || d <= to);
-    });
+    const allInRange = readAll(SHEETS.REGISTER).filter(r =>
+      inDateRangeKey_(r['Date'], p.from, p.to));
     const myRows = allInRange.filter(r => r['Staff ID'] === staffId);
     const approvedAll = allInRange.filter(r => r['Approval Status'] === 'Approved');
     const myApproved = myRows.filter(r => r['Approval Status'] === 'Approved');
@@ -3403,12 +3444,9 @@ const api = {
   getStoresKpiDebug: function (p) {
     if (p.actorRole !== 'Manager' && p.actorRole !== 'HR') throw new Error('Not authorized: Manager/HR only');
     if (!p || !p.from || !p.to) throw new Error('From Date and To Date are required');
-    const from = startOfDay(p.from), to = endOfDay(p.to);
-    const approvedInRange = readAll(SHEETS.REGISTER).filter(r => {
-      const d = new Date(r['Date']);
-      return d >= from && d <= to && r['Approval Status'] === 'Approved' &&
-        STORES_KPI_EXCLUDED_ACTIVITY_IDS.indexOf(r['Activity ID']) === -1;
-    });
+    const approvedInRange = readAll(SHEETS.REGISTER).filter(r =>
+      inDateRangeKey_(r['Date'], p.from, p.to) && r['Approval Status'] === 'Approved' &&
+      STORES_KPI_EXCLUDED_ACTIVITY_IDS.indexOf(r['Activity ID']) === -1);
     const workflows = readAll(SHEETS.WORKFLOW);
     const monthlyTargets = readAll(SHEETS.TARGETS);
     let staffList = readAll(SHEETS.STAFF).filter(s => s['Status'] === 'Active');
@@ -3579,6 +3617,155 @@ const api = {
     }).sort((a, b) => a.activityName.localeCompare(b.activityName));
   },
 
+  // ACTIVITY-STAFF PERFORMANCE REPORT (Sep 2026): one row per Staff x
+  // Activity, grouped/sorted Activity-first (all staff under each Activity)
+  // per the confirmed layout. Attendance (ACT009) is excluded automatically
+  // - _buildWorkflowPerfRows() already drops it for every report that calls
+  // it (single-source parity, see that function's own comment), so nothing
+  // extra is needed here to keep it out.
+  //
+  // Reuses the SAME per-staff aggregator as getStaffPerformanceReport() /
+  // the staff-scoped getKPIWorkflowPerformanceReport() - one
+  // _buildWorkflowPerfRows({..., staffId}) call per staff, so kpiScore/
+  // maxScore correctly reflect that staff's own fair Team-Split weightage
+  // share on any shared Team/Truck workflow (never the full company-wide
+  // weightage double-credited to every teammate).
+  //
+  // CAVEAT (matches existing staff-scoped KPI-Workflow report behaviour -
+  // NOT a new limitation introduced here): Monthly Target itself is never a
+  // per-staff value (getEffectiveTarget() returns the full Workflow's
+  // target regardless of staffId), so on a Team/Truck job worked by
+  // multiple staff, each staff's row shows that Activity's FULL Monthly
+  // Target, not their individual share - summing Monthly Target down the
+  // column across multiple staff on the same Activity will over-count.
+  // Approved Actual is correctly each staff's own figure (Approved rows are
+  // staffId-filtered before summing), and KPI Score/Max Score are correctly
+  // split - only Monthly Target/Balance carry this caveat, same as today's
+  // KPI/Workflow Performance report when staff-filtered.
+  getActivityStaffPerformanceReport: function (p) {
+    _validateReportRange(p);
+    let staffList = readAll(SHEETS.STAFF).filter(s => s['Status'] !== 'Inactive');
+    if (p.staffId) staffList = staffList.filter(s => s['Staff ID'] === p.staffId);
+    if (p.section) staffList = staffList.filter(s => s['Section'] === p.section);
+
+    const rows = [];
+    staffList.forEach(s => {
+      const wfRows = _buildWorkflowPerfRows({
+        from: p.from, to: p.to, section: p.section, activityId: p.activityId, staffId: s['Staff ID']
+      }).filter(r => r.entryCount > 0);
+
+      const byActivity = {};
+      wfRows.forEach(r => {
+        const g = byActivity[r.activityId] || (byActivity[r.activityId] = {
+          activityId: r.activityId, activityName: r.activityName,
+          monthlyTarget: 0, approvedActual: 0, approvedCount: 0, kpiScore: 0, maxScore: 0
+        });
+        g.monthlyTarget += r.monthlyTarget;
+        g.approvedActual += r.approvedActual;
+        // approvedCount (Sep 2026 addition): number of approved ENTRIES
+        // (transactions) behind this staff+activity's Approved Actual
+        // quantity - summed from entryCount on each Workflow row under
+        // this Activity, same entryCount already used above to filter out
+        // zero-entry rows. Distinct from approvedActual, which is the sum
+        // of quantities, not a count of entries.
+        g.approvedCount += (r.entryCount || 0);
+        g.kpiScore += (r.kpiScore || 0);
+        g.maxScore += r.maxScore;
+      });
+
+      Object.values(byActivity).forEach(g => {
+        const monthlyTarget = Math.round(g.monthlyTarget * 100) / 100;
+        const approvedActual = Math.round(g.approvedActual * 100) / 100;
+        const approvedCount = g.approvedCount;
+        const kpiScore = Math.round(g.kpiScore * 100) / 100;
+        const maxScore = Math.round(g.maxScore * 100) / 100;
+        const balance = Math.round((monthlyTarget - approvedActual) * 100) / 100;
+        const achievementPct = computeAchievementPct(approvedActual, monthlyTarget);
+        const overallPct = maxScore > 0 ? Math.round((kpiScore / maxScore) * 10000) / 100 : 0;
+        rows.push({
+          activityId: g.activityId, activityName: g.activityName,
+          staffId: s['Staff ID'], staffName: s['Staff Name'], section: s['Section'],
+          monthlyTarget, approvedActual, approvedCount, balance, achievementPct, kpiScore, maxScore, overallPct
+        });
+      });
+    });
+
+    return rows.sort((a, b) =>
+      a.activityName === b.activityName ? a.staffName.localeCompare(b.staffName) : a.activityName.localeCompare(b.activityName)
+    );
+  },
+
+  // STAFF COMPARISON REPORT - REPLACED (Sep 2026 v2, Manager-confirmed):
+  // the old KPI-Score ranking version (Activities Count/Names, KPI Score,
+  // Max Score, Overall %, Rank) is REMOVED. v2 (Sep 2026) then made it a
+  // simple Staff x Workflow PARTICIPATION COUNT report (one row per
+  // Staff+Activity+Workflow). v3 (Sep 2026, Manager-confirmed) collapses
+  // that back down to ONE ROW PER STAFF - a summary of how many of their
+  // Section's configured Activities/Workflows they actually touched this
+  // period, plus their total Actual Count:
+  //   Total Activities / Total Workflows  = count of Active, non-Attendance
+  //     workflows (and the distinct Activities among them) configured for
+  //     the staff's Section via the Workflow Master 'Sections' field - see
+  //     _sectionTotals().
+  //   Participated Activities / Workflows = DISTINCT Activities/Workflows
+  //     the staff has an Approved entry against in the period.
+  //   Activity % / Workflow %             = Participated ÷ Total × 100.
+  //   Actual Count                        = total approved quantity across
+  //     every Approved entry (unchanged meaning from v2).
+  // Same action name/permission entry kept (getStaffComparisonReport) so no
+  // other wiring (REPORTS_MODULE permission map, frontend routing) needs to
+  // change - only this function body and the frontend's
+  // REPORT_DEFS.staffComparison column list (see index.html) were updated
+  // together.
+  //
+  // SINGLE SOURCE (unchanged principle - spec item 18): still built from
+  // _buildWorkflowPerfRows(), the same shared aggregator every other
+  // Performance Report uses, scoped per staff via {..., staffId} exactly
+  // like getActivityStaffPerformanceReport() just above - so "Actual Count"
+  // and the Participated figures are the SAME Team-Ref-No-deduped,
+  // Approved-only data shown everywhere else in the app. Attendance
+  // (ACT009) is excluded automatically on both sides (participated, via
+  // _buildWorkflowPerfRows(); total, via _sectionTotals()'s matching
+  // STORES_KPI_EXCLUDED_ACTIVITY_IDS filter) so Participated vs Total stay
+  // an apples-to-apples comparison.
+  //
+  // NOTE: Total Activities/Total Workflows/% will read 0 for any Section
+  // whose Workflow Master rows don't yet have their 'Sections' field filled
+  // in - see migrateAddWorkflowSectionsField().
+  //
+  // Sort: Staff Name.
+  getStaffComparisonReport: function (p) {
+    _validateReportRange(p);
+    let staffList = readAll(SHEETS.STAFF).filter(s => s['Status'] !== 'Inactive');
+    if (p.staffId) staffList = staffList.filter(s => s['Staff ID'] === p.staffId);
+    if (p.section) staffList = staffList.filter(s => s['Section'] === p.section);
+
+    const rows = staffList.map(s => {
+      const wfRows = _buildWorkflowPerfRows({
+        from: p.from, to: p.to, section: p.section, activityId: p.activityId, staffId: s['Staff ID']
+      }).filter(r => r.entryCount > 0);
+
+      const participatedWorkflows = wfRows.length; // one row per distinct Workflow already
+      const participatedActivities = new Set(wfRows.map(r => r.activityId)).size;
+      const actualCount = Math.round(wfRows.reduce((sum, r) => sum + r.approvedActual, 0) * 100) / 100;
+
+      const totals = _sectionTotals(s['Section']);
+      const activityPct = totals.totalActivities > 0
+        ? Math.round((participatedActivities / totals.totalActivities) * 10000) / 100 : 0;
+      const workflowPct = totals.totalWorkflows > 0
+        ? Math.round((participatedWorkflows / totals.totalWorkflows) * 10000) / 100 : 0;
+
+      return {
+        staffId: s['Staff ID'], staffName: s['Staff Name'], section: s['Section'],
+        totalActivities: totals.totalActivities, participatedActivities, activityPct,
+        totalWorkflows: totals.totalWorkflows, participatedWorkflows, workflowPct,
+        actualCount
+      };
+    });
+
+    return rows.sort((a, b) => a.staffName.localeCompare(b.staffName));
+  },
+
   getKPIWorkflowPerformanceReport: function (p) {
     _validateReportRange(p);
     // ENTRYCOUNT>0 FILTER (Aug 2026 fix - Section/Activity Performance
@@ -3591,7 +3778,20 @@ const api = {
     // Overall % disagree with Section Performance (and now Activity
     // Performance) for the identical date range/data.
     const wfRows = _buildWorkflowPerfRows(p).filter(r => r.entryCount > 0);
+    // STAFF NAME (Sep 2026 - staff-wise KPI/Workflow report request): when
+    // this report is scoped to one staff via p.staffId, look up that
+    // staff's name once and echo it onto every row - same existing pattern
+    // as 'section' just below, which already echoes p.section onto every
+    // row for a section-scoped call. Left blank for company/section-wide
+    // calls (no p.staffId), since this report is workflow-aggregated, not
+    // one row per staff.
+    let staffName = '';
+    if (p.staffId) {
+      const staffRow = readAll(SHEETS.STAFF).find(s => s['Staff ID'] === p.staffId);
+      staffName = staffRow ? staffRow['Staff Name'] : '';
+    }
     return wfRows.map(r => ({
+      staffName,
       activityName: r.activityName, workflowName: r.workflowName, kpiName: r.kpiName,
       section: p.section || '', monthlyTarget: r.monthlyTarget, approvedActual: r.approvedActual,
       balance: r.balance, achievementPct: r.achievementPct, weightagePct: r.weightagePct,
@@ -3731,13 +3931,9 @@ const api = {
   // other report above which is Approved-only.
   getApprovalWorkingRegisterReport: function (p) {
     _validateReportRange(p);
-    const from = startOfDay(p.from), to = endOfDay(p.to);
     const staffSectionOf = {};
     readAll(SHEETS.STAFF).forEach(s => staffSectionOf[s['Staff ID']] = s['Section']);
-    let rows = readAll(SHEETS.REGISTER).filter(r => {
-      const d = new Date(r['Date']);
-      return d >= from && d <= to;
-    });
+    let rows = readAll(SHEETS.REGISTER).filter(r => inDateRangeKey_(r['Date'], p.from, p.to));
     if (p.staffId) rows = rows.filter(r => r['Staff ID'] === p.staffId);
     if (p.activityId) rows = rows.filter(r => r['Activity ID'] === p.activityId);
     if (p.workflowId) rows = rows.filter(r => r['Workflow ID'] === p.workflowId);
@@ -4094,7 +4290,7 @@ const api = {
     if (!p.staffId || !p.from || !p.to) throw new Error('staffId, from and to are required');
     const from = startOfDay(p.from), to = endOfDay(p.to);
     const attRows = readAll(SHEETS.ATTENDANCE).filter(r =>
-      r['Staff ID'] === p.staffId && r['Date'] && new Date(r['Date']) >= from && new Date(r['Date']) <= to);
+      r['Staff ID'] === p.staffId && r['Date'] && inDateRangeKey_(r['Date'], p.from, p.to));
     // ATTENDANCE FORMULA FIX (P1): attendance status and performance/
     // discipline deduction are two different things - Late, Permission,
     // and Early Leaving all mean the employee DID work that day, so each
@@ -4171,7 +4367,7 @@ const api = {
 
     return staffList.map(staff => {
       const id = staff['Staff ID'];
-      const rows = attAll.filter(r => r['Staff ID'] === id && r['Date'] && new Date(r['Date']) >= from && new Date(r['Date']) <= to);
+      const rows = attAll.filter(r => r['Staff ID'] === id && r['Date'] && inDateRangeKey_(r['Date'], p.from, p.to));
       let presentDays = 0, permissionHours = 0, late = 0, early = 0, shiftGood = 0;
       rows.forEach(r => {
         const st = String(r['Status'] || '');
@@ -5439,11 +5635,9 @@ function computeStaffFixedActiveWorkflowMaxScore_(staffId, workflows) {
 }
 
 function computeStoresKPIPct(staffId, from, to) {
-  const approvedInRange = readAll(SHEETS.REGISTER).filter(r => {
-    const d = new Date(r['Date']);
-    return d >= from && d <= to && r['Approval Status'] === 'Approved' &&
-      STORES_KPI_EXCLUDED_ACTIVITY_IDS.indexOf(r['Activity ID']) === -1;
-  });
+  const approvedInRange = readAll(SHEETS.REGISTER).filter(r =>
+    inDateRangeKey_(r['Date'], from, to) && r['Approval Status'] === 'Approved' &&
+    STORES_KPI_EXCLUDED_ACTIVITY_IDS.indexOf(r['Activity ID']) === -1);
   const regRows = approvedInRange.filter(r => r['Staff ID'] === staffId);
   // FIX (Stores KPI Team-Split Dilution Fix, Aug 2026): Actual is aggregated
   // per Workflow+Month BEFORE Achievement %/KPI Score are computed - see
@@ -5533,6 +5727,32 @@ function _dedupApprovedQty(rows) {
 // quantity from Approved rows in [p.from, p.to], optionally further scoped
 // to p.staffId's own rows and/or p.section's staff.
 // p: { from, to, activityId?, workflowId?, section?, staffId? }
+// SECTION TOTALS (Sep 2026 - Staff Comparison report v3): Total
+// Activities/Total Workflows for one Section, derived from the new
+// Workflow Master 'Sections' field (see EDITABLE_WORKFLOW_FIELDS comment
+// and migrateAddWorkflowSectionsField()). Only Active, non-Attendance
+// workflows count - same STORES_KPI_EXCLUDED_ACTIVITY_IDS/Active filter
+// _buildWorkflowPerfRows() already applies, so Participated vs Total stay
+// an apples-to-apples comparison. Deliberately independent of the Stores
+// KPI Max Score denominator (computeStaffFixedActiveWorkflowMaxScore_),
+// which stays company-wide per the earlier Option B decision.
+function _sectionTotals(section) {
+  const workflows = readAll(SHEETS.WORKFLOW).filter(w => w['Status'] !== 'Inactive' &&
+    STORES_KPI_EXCLUDED_ACTIVITY_IDS.indexOf(w['Activity ID']) === -1 &&
+    _workflowAppliesToSection(w, section));
+  return {
+    totalWorkflows: workflows.length,
+    totalActivities: new Set(workflows.map(w => w['Activity ID'])).size
+  };
+}
+
+function _workflowAppliesToSection(w, section) {
+  const raw = String(w['Sections'] || '').trim();
+  if (!raw) return false; // not yet configured - counts toward no Section
+  if (raw.toLowerCase() === 'all') return true;
+  return raw.split(',').map(x => x.trim()).indexOf(section) !== -1;
+}
+
 function _buildWorkflowPerfRows(p) {
   const from = startOfDay(p.from), to = endOfDay(p.to);
   const monthLabels = _monthLabelsInRange(p.from, p.to);
@@ -5560,10 +5780,8 @@ function _buildWorkflowPerfRows(p) {
   // purely so withTeamSplit() below can see every teammate's row and size
   // each Team Ref No group correctly, exactly like every other
   // withTeamSplit()/computeStaffWorkflowKpiGroups_ call in this file.
-  let approvedRowsScoped = readAll(SHEETS.REGISTER).filter(r => {
-    const d = new Date(r['Date']);
-    return r['Approval Status'] === 'Approved' && d >= from && d <= to;
-  });
+  let approvedRowsScoped = readAll(SHEETS.REGISTER).filter(r =>
+    r['Approval Status'] === 'Approved' && inDateRangeKey_(r['Date'], from, to));
   if (p.section) approvedRowsScoped = approvedRowsScoped.filter(r => staffSectionOf[r['Staff ID']] === p.section);
   let approvedRows = p.staffId
     ? approvedRowsScoped.filter(r => r['Staff ID'] === p.staffId)
@@ -5618,9 +5836,19 @@ function _buildWorkflowPerfRows(p) {
     // "Over Achieved", never silently clipped) - only the KPI Score
     // contribution is capped, via computeKpiScore()'s existing over-
     // achievement control (HR_APPRAISAL_POLICY.MAX_ACHIEVEMENT_PCT_FOR_SCORING).
+    // FIX (Sep 2026 report-wise audit): this used to pre-clip Achievement %
+    // to a hardcoded 100 before calling computeKpiScore(), unlike every
+    // other computeKpiScore() caller in the app (Dashboard/My Score/Stores
+    // KPI), which all pass the raw Achievement % and let computeKpiScore()
+    // do the ONE authoritative cap via the configurable
+    // MAX_ACHIEVEMENT_PCT_FOR_SCORING policy value. Harmless today only
+    // because that policy value happens to be 100 - if it's ever raised to
+    // credit partial over-achievement, these Reports (#2 Activity, #4
+    // Activity-Staff, #5 KPI/Workflow, #6 Section, #7 Date-Range, #8
+    // Monthly Target & Achievement) would have silently kept the old 100%
+    // ceiling while every other screen honored the new policy value.
     const achievementPct = computeAchievementPct(approvedActual, target);
-    const cappedForScoring = achievementPct === null ? null : Math.min(achievementPct, 100);
-    const kpiScore = computeKpiScore(cappedForScoring, weightagePct);
+    const kpiScore = computeKpiScore(achievementPct, weightagePct);
     const balance = Math.round((target - approvedActual) * 100) / 100;
 
     return {
@@ -5836,10 +6064,10 @@ function setup() {
     ['WF0050', 'ACT009', 'Permission', 'Permission Hours', 'Hours', 1, 25, 25, 'Permission hours within approved limit'] // Attendance - excluded from Stores KPI scoring
   ];
   const wfFull = wfRaw.map(w => [
-    w[0], w[1], actNameById[w[1]], w[2], w[3], w[4], w[5], w[6], w[7], w[8], 'Active'
+    w[0], w[1], actNameById[w[1]], w[2], w[3], w[4], w[5], w[6], w[7], w[8], 'Active', ''
   ]);
   buildSheet(SHEETS.WORKFLOW, ['Workflow ID', 'Activity ID', 'Activity Name', 'Workflow Name', 'KPI Name', 'Unit',
-    'Target', 'Weightage %', 'Max Score', 'Expected Output', 'Status'], wfFull);
+    'Target', 'Weightage %', 'Max Score', 'Expected Output', 'Status', 'Sections'], wfFull);
 
   buildSheet(SHEETS.REGISTER, ['Line ID', 'Entry Group ID', 'Date', 'Truck No', 'Staff ID', 'Staff Name', 'Logged By ID', 'Logged By Name',
     'Activity ID', 'Activity Name', 'Team Ref No', 'Workflow ID', 'Workflow Name', 'KPI Name', 'Unit', 'Target', 'Target Source', 'Actual',
@@ -6821,6 +7049,33 @@ function migrateAddStaffEmailField() {
   SpreadsheetApp.flush();
   Logger.log('migrateAddStaffEmailField() complete - added \'Email\' column to Staff Master (blank for all existing staff). ' +
     'Fill in each staff member\'s email address to start receiving email notifications alongside the existing in-app bell notifications.');
+}
+
+// SECTIONS FIELD ON WORKFLOW MASTER (Sep 2026 - Staff Comparison report v3):
+// run this ONCE, manually from the Apps Script editor, on the LIVE
+// spreadsheet before deploying the Staff Comparison report change. Adds a
+// blank 'Sections' column to the existing Workflow Master sheet (does NOT
+// default it to 'All' or guess values - Manager fills each workflow's
+// applicable Section ID(s) in by hand afterwards via the Edit Workflow
+// screen). Until a workflow's Sections is filled in, it counts toward NO
+// Section's Total Activities/Total Workflows on the Staff Comparison report
+// (see _sectionTotals() in Code.gs) - that report's Total/% columns will
+// under-report as 0 for every Section until this migration is run AND the
+// Sections values are filled in.
+function migrateAddWorkflowSectionsField() {
+  const s = sh(SHEETS.WORKFLOW);
+  const headers = s.getRange(1, 1, 1, s.getLastColumn()).getValues()[0];
+  if (headers.indexOf('Sections') !== -1) {
+    Logger.log('Sections column already exists on Workflow Master - nothing to do.');
+    return;
+  }
+  const col = s.getLastColumn() + 1;
+  s.getRange(1, col).setValue('Sections').setFontWeight('bold').setBackground('#6F4E37').setFontColor('#FFFFFF');
+  SpreadsheetApp.flush();
+  Logger.log('migrateAddWorkflowSectionsField() complete - added \'Sections\' column to Workflow Master ' +
+    '(blank for every existing workflow). Go to Edit Workflow and set each workflow\'s applicable Section ID(s) ' +
+    '(comma-separated, e.g. "SEC01,SEC02") or "All" before relying on the Staff Comparison report\'s ' +
+    'Total Activities/Total Workflows/% columns - they read 0 for any Section whose workflows are not yet configured.');
 }
 
 // ============================================================
