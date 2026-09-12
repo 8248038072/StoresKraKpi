@@ -1445,6 +1445,13 @@ const I18N = {
   repApprovalRegister: { en: "✅ Approval / Working Register", ta: "✅ ஒப்புதல் / பணி பதிவேடு" },
   repHrAppraisalStaffWise: { en: "🎖️ HR Appraisal (Staff-wise)", ta: "🎖️ HR மதிப்பீடு (பணியாளர் வாரியாக)" },
   colMonthlyTarget: { en: "Monthly Target", ta: "மாதாந்திர இலக்கு" },
+  // Staff Performance report ONLY (Sep 2026): this report's "monthlyTarget"
+  // field is each staff's own participated/Team-Split share of target
+  // across the workflows they took part in - NOT the full department/
+  // Section Monthly Target - so it gets its own distinct label here rather
+  // than reusing colMonthlyTarget (which every other report keeps, since
+  // those genuinely show the full Workflow/Activity/Section target).
+  colParticipatedTarget: { en: "Participated Target", ta: "பங்கேற்ற இலக்கு" },
   colApprovedActual: { en: "Approved Actual", ta: "ஒப்புதல் உண்மையானது" },
   colApprovedCount: { en: "Approved Count", ta: "ஒப்புதல் எண்ணிக்கை" },
   colBalance: { en: "Balance", ta: "மீதம்" },
@@ -1570,6 +1577,20 @@ function escapeHtml(val) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// PRE-LIVE AUDIT FIX (Sep 2026): safe numeric display for any score/percentage
+// field before calling .toFixed() on it. A raw `x.toFixed(d)` throws a
+// TypeError ("Cannot read properties of undefined") the moment the backend
+// value is missing/null (e.g. a staff row with no appraisal snapshot yet, no
+// approved KPI entries this month, a not-yet-computed trend, etc.), which
+// blanks the whole table/card instead of just showing 0.0 for that row. This
+// helper coerces undefined/null/NaN/non-numeric values to 0 before
+// formatting, so a missing figure always renders as "0.0" instead of
+// crashing the surrounding render.
+function fnum(v, d) {
+  const n = Number(v);
+  return (isNaN(n) ? 0 : n).toFixed(d === undefined ? 1 : d);
 }
 
 // Only allow http(s)/mailto links through as-is; anything else (in
@@ -2234,12 +2255,12 @@ async function loadDashboard() {
   if (d.trend) {
     const arrow = d.trend.direction === 'up' ? '▲' : (d.trend.direction === 'down' ? '▼' : '►');
     const color = d.trend.direction === 'up' ? '#2e7d32' : (d.trend.direction === 'down' ? '#c62828' : '#757575');
-    trendHtml = `<div style="font-size:12px;margin-top:2px;color:${color}">${arrow} ${Math.abs(d.trend.change).toFixed(1)} ${T('vsPrevPeriod')}</div>`;
+    trendHtml = `<div style="font-size:12px;margin-top:2px;color:${color}">${arrow} ${fnum(Math.abs(d.trend.change || 0))} ${T('vsPrevPeriod')}</div>`;
   }
 
   document.getElementById('dashStats').innerHTML = `
     <div class="stat-card"><div class="label">${T('approvedEntriesMtd')}</div><div class="value">${d.totalEntries}</div></div>
-    <div class="stat-card alt"><div class="label">${T('totalKpiPctMtd')}</div><div class="value">${d.totalKpiPct.toFixed(1)}%</div>${trendHtml}</div>
+    <div class="stat-card alt"><div class="label">${T('totalKpiPctMtd')}</div><div class="value">${fnum(d.totalKpiPct)}%</div>${trendHtml}</div>
     <div class="stat-card"><div class="label">${T('pendingApprovals')}</div><div class="value">${d.pendingApprovals}</div></div>
     <div class="stat-card alt"><div class="label">${T('role')}</div><div class="value" style="font-size:18px">${SESSION.role}</div></div>
   `;
@@ -3124,7 +3145,7 @@ async function loadAppraisal() {
   document.querySelector('#appraisalTable tbody').innerHTML = lastAppraisal.map(a => `
     <tr>
       <td>${escapeHtml(a.staffName)}</td><td>${escapeHtml(a.designation)}</td><td>${escapeHtml(a.section)}</td><td>${a.entries}</td>
-      <td>${a.totalKpiScore.toFixed(1)}</td>
+      <td>${fnum(a.totalKpiScore)}</td>
     </tr>`).join('') || `<tr><td colspan="5" class="empty">${T('noApprovedRange')}</td></tr>`;
 }
 function ratingBadgeClass(r) {
@@ -3378,19 +3399,19 @@ async function runFullAppraisal() {
   document.querySelector('#hrScorecardTable tbody').innerHTML = lastFullAppraisal.map(a => `
     <tr>
       <td>${escapeHtml(a.staffName)}</td>
-      <td>${a.criteria.attendance.toFixed(1)}</td><td>${a.criteria.leaveManagement.toFixed(1)}</td>
-      <td>${a.criteria.permissionHours.toFixed(1)}</td><td>${a.criteria.lateComing.toFixed(1)}</td>
-      <td>${a.criteria.earlyLeaving.toFixed(1)}</td><td>${a.criteria.shiftCompliance.toFixed(1)}</td>
-      <td>${a.criteria.discipline.toFixed(1)}</td><td>${a.criteria.policyCompliance.toFixed(1)}</td>
-      <td>${a.criteria.behaviour.toFixed(1)}</td>
-      <td>${a.criteria.training.toFixed(1)} <button class="btn btn-outline btn-sm" style="padding:2px 6px" title="View Training Details" data-action="openTrainingDetails" data-id="${escapeHtml(a.staffId)}">🎓</button></td>
-      <td>${a.criteria.hrRemarks.toFixed(1)}</td>
-      <td>${a.hrScore.toFixed(1)}</td>
+      <td>${fnum((a.criteria||{}).attendance)}</td><td>${fnum((a.criteria||{}).leaveManagement)}</td>
+      <td>${fnum((a.criteria||{}).permissionHours)}</td><td>${fnum((a.criteria||{}).lateComing)}</td>
+      <td>${fnum((a.criteria||{}).earlyLeaving)}</td><td>${fnum((a.criteria||{}).shiftCompliance)}</td>
+      <td>${fnum((a.criteria||{}).discipline)}</td><td>${fnum((a.criteria||{}).policyCompliance)}</td>
+      <td>${fnum((a.criteria||{}).behaviour)}</td>
+      <td>${fnum((a.criteria||{}).training)} <button class="btn btn-outline btn-sm" style="padding:2px 6px" title="View Training Details" data-action="openTrainingDetails" data-id="${escapeHtml(a.staffId)}">🎓</button></td>
+      <td>${fnum((a.criteria||{}).hrRemarks)}</td>
+      <td>${fnum(a.hrScore)}</td>
       <td>${a.bonusMarks ? '+' + a.bonusMarks : '-'}</td>
       <td>${a.memoDeduction ? '-' + a.memoDeduction : '-'}${a.repeatEscalation ? ` <span class="tag" title="Repeat-memo escalation included">(incl. -${a.repeatEscalation} repeat)</span>` : ''}</td>
-      <td>${a.hrFinalScore.toFixed(1)}</td>
-      <td>${a.storesKpiPct.toFixed(1)}</td>
-      <td><strong>${a.combinedFinalScore.toFixed(1)}</strong> <button class="btn btn-outline btn-sm" style="padding:2px 6px" title="View Trend" data-action="openStaffTrend" data-id="${escapeHtml(a.staffId)}">📈</button></td>
+      <td>${fnum(a.hrFinalScore)}</td>
+      <td>${fnum(a.storesKpiPct)}</td>
+      <td><strong>${fnum(a.combinedFinalScore)}</strong> <button class="btn btn-outline btn-sm" style="padding:2px 6px" title="View Trend" data-action="openStaffTrend" data-id="${escapeHtml(a.staffId)}">📈</button></td>
       <td>${escapeHtml(a.grade)}</td>
       <td><span class="badge ${safeStatusClass(a.finalRating)}">${escapeHtml(a.finalRating)}</span></td>
     </tr>`).join('') || `<tr><td colspan="19" class="empty">${T('noActiveStaffData')}</td></tr>`;
@@ -3769,7 +3790,7 @@ async function msRefreshTrainingDisplay(staffId, periodLabel) {
   if (!staffId || !periodLabel || !from || !to) { disp.value = '— / 10'; return; }
   try {
     const full = await callApi('getFullAppraisal', { staffId, periodLabel, from, to });
-    disp.value = full[0] ? full[0].criteria.training.toFixed(1) + ' / 10' : '0.0 / 10';
+    disp.value = full[0] ? fnum((full[0].criteria||{}).training) + ' / 10' : '0.0 / 10';
   } catch (e) { disp.value = '— / 10'; }
 }
 
@@ -3883,7 +3904,7 @@ async function openStaffTrend(staffId) {
   try { d = await callApi('getStaffAppraisalTrend', hrActorParams({ staffId })); } catch (e) { toast(e.message); return; }
   const arrow = d.direction === 'up' ? '▲' : (d.direction === 'down' ? '▼' : (d.direction === 'flat' ? '►' : ''));
   const changeTxt = d.direction === 'up' || d.direction === 'down'
-    ? ` ${arrow} ${Math.abs(d.change).toFixed(1)} ${T('vsPrevPeriod')}` : '';
+    ? ` ${arrow} ${fnum(Math.abs(d.change || 0))} ${T('vsPrevPeriod')}` : '';
   document.getElementById('stSubtitle').textContent =
     `${d.staffName} · ${d.designation || ''} — ${d.snapshotCount} ${T('snapshotsSaved')}${changeTxt}`;
   const canvas = document.getElementById('chartStaffTrend');
@@ -3920,7 +3941,7 @@ async function openTrainingDetails(staffId, fromOverride, toOverride, periodOver
     <td>${escapeHtml(r['Eligible'])}</td><td>${escapeHtml(r['Auto Score'])}</td></tr>
   `).join('') || `<tr><td colspan="8" class="empty">${T('noTrainingRecordsYet')}</td></tr>`;
   const total = Math.min(rows.filter(r => r['Eligible'] === 'Yes').reduce((s, r) => s + (Number(r['Auto Score']) || 0), 0), 10);
-  document.getElementById('tdTotal').textContent = T('totalTrainingScore') + ': ' + total.toFixed(1) + ' / 10';
+  document.getElementById('tdTotal').textContent = T('totalTrainingScore') + ': ' + fnum(total) + ' / 10';
   document.getElementById('trainingDetailModal').style.display = 'flex';
 }
 
@@ -3930,16 +3951,16 @@ async function loadHrSummary() {
   if (!p.periodLabel || !p.from || !p.to) return;
   let s;
   try { s = await callApi('getHRManagementSummary', p); } catch (e) { toast(e.message); return; }
-  const row = (name, score, extra) => `<li><span>${escapeHtml(name)}</span><span class="tag">${score.toFixed(1)}${extra || ''}</span></li>`;
+  const row = (name, score, extra) => `<li><span>${escapeHtml(name)}</span><span class="tag">${fnum(score)}${extra || ''}</span></li>`;
   document.getElementById('sumTop').innerHTML = s.topPerformers.map(r => row(r.staffName, r.finalScore)).join('') || `<li class="empty">${T('none')}</li>`;
   document.getElementById('sumImprove').innerHTML = s.needingImprovement.map(r => row(r.staffName, r.finalScore)).join('') || `<li class="empty">${T('none')}</li>`;
   document.getElementById('sumPromo').innerHTML = s.eligibleForPromotion.map(r => row(r.staffName, r.finalScore)).join('') || `<li class="empty">${T('none')}</li>`;
   document.getElementById('sumIncrement').innerHTML = s.recommendedForIncrement.map(r => row(r.staffName, r.finalScore)).join('') || `<li class="empty">${T('none')}</li>`;
   document.getElementById('sumTraining').innerHTML = s.recommendedForTraining.map(r =>
-    `<li><span>${escapeHtml(r.staffName)} <br>${(r.weakAreas || []).map(w => `<span class="weak-tag">${escapeHtml(w)}</span>`).join('')}</span><span class="tag">${r.finalScore.toFixed(1)}</span></li>`
+    `<li><span>${escapeHtml(r.staffName)} <br>${(r.weakAreas || []).map(w => `<span class="weak-tag">${escapeHtml(w)}</span>`).join('')}</span><span class="tag">${fnum(r.finalScore)}</span></li>`
   ).join('') || `<li class="empty">${T('none')}</li>`;
   document.getElementById('sumDisciplinary').innerHTML = s.disciplinaryConcerns.map(r =>
-    `<li><span>${escapeHtml(r.staffName)} <br>${(r.memos || []).map(m => `<span class="weak-tag">${escapeHtml(m.type)}</span>`).join('')}</span><span class="tag">${r.finalScore.toFixed(1)}</span></li>`
+    `<li><span>${escapeHtml(r.staffName)} <br>${(r.memos || []).map(m => `<span class="weak-tag">${escapeHtml(m.type)}</span>`).join('')}</span><span class="tag">${fnum(r.finalScore)}</span></li>`
   ).join('') || `<li class="empty">${T('none')}</li>`;
 }
 
@@ -3951,13 +3972,13 @@ async function loadHrDashboard() {
   try { d = await callApi('getHRDashboard', p); } catch (e) { toast(e.message); return; }
 
   document.getElementById('hrDashStats').innerHTML = `
-    <div class="stat-card"><div class="label">Overall Average</div><div class="value">${d.overallAverage.toFixed(1)}</div></div>
+    <div class="stat-card"><div class="label">Overall Average</div><div class="value">${fnum(d.overallAverage)}</div></div>
     <div class="stat-card alt"><div class="label">Staff Ranked</div><div class="value">${d.staffRanking.length}</div></div>
     <div class="stat-card"><div class="label">Snapshots Saved</div><div class="value">${d.monthlyTrend.length}</div></div>
     <div class="stat-card alt"><div class="label">Departments</div><div class="value">${d.departmentWise.length}</div></div>
   `;
   document.querySelector('#hrRankTable tbody').innerHTML = d.staffRanking.map(r => `
-    <tr><td>#${r.rank}</td><td>${escapeHtml(r.staffName)}</td><td>${escapeHtml(r.department)}</td><td>${r.finalScore.toFixed(1)}</td>
+    <tr><td>#${r.rank}</td><td>${escapeHtml(r.staffName)}</td><td>${escapeHtml(r.department)}</td><td>${fnum(r.finalScore)}</td>
     <td><span class="badge ${safeStatusClass(r.rating)}">${escapeHtml(r.rating)}</span></td></tr>
   `).join('') || `<tr><td colspan="5" class="empty">${T('noData')}</td></tr>`;
 
@@ -4060,7 +4081,7 @@ const REPORT_DEFS = {
     columns: [
       { key: 'staffId', labelKey: 'colStaffId' }, { key: 'staffName', labelKey: 'staff' },
       { key: 'section', labelKey: 'section' }, { key: 'designation', labelKey: 'colDesignation' },
-      { key: 'monthlyTarget', labelKey: 'colMonthlyTarget', fmt: 'num' }, { key: 'approvedActual', labelKey: 'colApprovedActual', fmt: 'num' },
+      { key: 'monthlyTarget', labelKey: 'colParticipatedTarget', fmt: 'num' }, { key: 'approvedActual', labelKey: 'colApprovedActual', fmt: 'num' },
       { key: 'balance', labelKey: 'colBalance', fmt: 'num' }, { key: 'achievementPct', labelKey: 'colAchievementPct', fmt: 'pct' },
       { key: 'kpiScore', labelKey: 'colKpiScore', fmt: 'num' }, { key: 'maxScore', labelKey: 'colMaxScore', fmt: 'num' },
       { key: 'overallPct', labelKey: 'colOverallPct', fmt: 'pct' }, { key: 'rating', labelKey: 'colRating', fmt: 'badge' }
