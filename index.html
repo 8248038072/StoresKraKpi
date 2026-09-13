@@ -1597,10 +1597,20 @@ function fnum(v, d) {
 // particular javascript:, data:, vbscript:) is neutralized to '#' so it
 // can never execute when clicked. An empty/missing URL stays empty so
 // callers can still test truthiness the same way as before.
+// SECURITY FIX (audit HIGH-001): the protocol check above only ever
+// guarded against dangerous SCHEMES (javascript:, data:, ...) - it never
+// stopped a value that starts with an allowed scheme but also contains a
+// literal `"` from breaking out of the surrounding href="${safeUrl(...)}"
+// attribute, e.g. https://x.com/" onmouseover="alert(1). Every caller
+// interpolates this return value directly inside a double-quoted HTML
+// attribute, so the result must ALSO be HTML-attribute-escaped before
+// being returned - escapeHtml() neutralizes ", <, >, & the same way it
+// already does for element text content, and is safe here since a
+// legitimate http(s)/mailto URL never needs raw " < > & characters.
 function safeUrl(val) {
   const s = String(val === null || val === undefined ? '' : val).trim();
   if (s === '') return '';
-  return /^(https?:|mailto:)/i.test(s) ? s : '#';
+  return /^(https?:|mailto:)/i.test(s) ? escapeHtml(s) : '#';
 }
 
 // For values used as a CSS class name (e.g. status badges) - only allow
