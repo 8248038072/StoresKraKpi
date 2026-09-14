@@ -8,13 +8,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Tamil:wght@400;600;700&display=swap" rel="stylesheet">
-<link rel="manifest" href="./manifest.json">
-<meta name="theme-color" content="#3B2415">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Stores KPI">
-<link rel="apple-touch-icon" href="icons/icon-192.png">
 <style>
 :root{
   --coffee-900:#3B2415; --coffee-700:#6F4E37; --coffee-500:#9C6B45;
@@ -1071,7 +1064,7 @@ function localDateStr(d) {
 /* ============================================================
    CONFIG — paste your deployed Apps Script Web App URL here
    ============================================================ */
-const API_URL = "https://script.google.com/macros/s/AKfycbxmJ8BXZva6XGubLZ0KOFQZq8gfgcIXrH4PSId-g1RNYNibpxYC2_D24FxmB2PuEA/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbz56vQFVJnajC6mNO8ROwIQPTBgKhT5RkVYeC_09ZJZ1YOyEZiFgNoydhIy4mY6ZM75/exec";
 /*
  * Sri Narasu's Coffee Company Pvt Ltd
  * Stores Department - Staff Working Register & KPI Appraisal System
@@ -4660,19 +4653,6 @@ function fmtDate(d) {
   const dd = String(dt.getDate()).padStart(2, '0');
   const mm = String(dt.getMonth() + 1).padStart(2, '0');
   return `${dd}-${mm}-${dt.getFullYear()}`;
-}
-</script>
-<script>
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./service-worker.js')
-      .then(registration => {
-        console.log('Stores KPI PWA Service Worker registered:', registration.scope);
-      })
-      .catch(error => {
-        console.error('PWA Service Worker registration failed:', error);
-      });
-  });
 }
 </script>
 </body>
