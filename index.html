@@ -178,6 +178,7 @@ tr:hover td{background:#FFFBF3;}
 .badge.Completed{background:#E1EBD9; color:var(--ok);}
 .badge.InProgress{background:#FCEBC9; color:var(--warn);}
 .badge.Pending{background:#F5DAD5; color:var(--danger);}
+.badge.SelfApproved{background:#F5DAD5; color:var(--danger); border:1px solid var(--danger); margin-left:4px;}
 
 .memo-timeline{list-style:none; margin-top:12px;}
 .memo-timeline li{padding:4px 0 12px 22px; border-left:2px solid var(--coffee-300); position:relative; font-size:12.5px; color:var(--coffee-900);}
@@ -683,6 +684,7 @@ main.content{
             <div style="align-self:end;"><button class="btn btn-outline hr-edit-only" onclick="saveHrSnapshot()" data-i18n="saveSnapshot">💾 Save Snapshot</button></div>
             <div style="align-self:end;"><button class="btn btn-outline hr-edit-only" onclick="lockHrSnapshot()">🔒 Approve &amp; Lock Period</button></div>
             <div style="align-self:end;"><button class="btn btn-outline hr-edit-only" onclick="reopenHrSnapshot()">🔓 Re-open for Revision</button></div>
+            <div style="align-self:end;"><button class="btn btn-outline hr-edit-only" onclick="runBackupNow()" title="Take an extra spreadsheet backup right now, in addition to the automatic daily one">💽 Backup Now</button></div>
           </div>
           <p class="li-target-info" data-i18n="periodLabelInfo">Period Label tags Recognition, Memo and Manual Score records for this cycle (e.g. "Jul-2026"). Saving a Snapshot lets the Department Dashboard build a Monthly/Yearly trend.</p>
           <p class="li-target-info">Once a period is <b>Approved &amp; Locked</b>, Save Snapshot will refuse to overwrite it - use Re-open for Revision first if it genuinely needs to change (reason required, fully audited).</p>
@@ -1482,6 +1484,7 @@ const I18N = {
   colApprovedOn: { en: "Approved Date", ta: "ஒப்புதல் தேதி" },
   colApprovedBy: { en: "Approved By", ta: "ஒப்புதல் அளித்தவர்" },
   colRejectionReason: { en: "Rejection Reason", ta: "நிராகரிப்பு காரணம்" },
+  selfApprovedBadge: { en: "⚠ Self-Approved", ta: "⚠ சுய-ஒப்புதல்" },
   colTotal: { en: "Total", ta: "மொத்தம்" },
   repNoData: { en: "No data for the selected filters", ta: "தேர்ந்தெடுக்கப்பட்ட வடிகட்டிகளுக்கு தரவு இல்லை" },
   repLoading: { en: "Loading...", ta: "ஏற்றுகிறது..." },
@@ -2718,7 +2721,7 @@ async function loadRegister() {
     <tr>
       <td>${fmtDate(r['Date'])}</td><td>${escapeHtml(r['Activity Name'])}</td><td>${escapeHtml(r['Workflow Name'])}</td><td>${escapeHtml(r['Staff Name'])}</td>
       <td>${coStaffLabel(r)}</td><td>${escapeHtml(r['Target'])}</td><td>${escapeHtml(r['Actual'])}</td><td>${scoreCell}</td>
-      <td><span class="badge ${safeStatusClass(r['Approval Status'])}">${escapeHtml(r['Approval Status'])}</span></td>
+      <td><span class="badge ${safeStatusClass(r['Approval Status'])}">${escapeHtml(r['Approval Status'])}</span>${r['Self Approved'] === 'Yes' ? ` <span class="badge SelfApproved" title="Manager approved their own entry">${T('selfApprovedBadge')}</span>` : ''}</td>
     </tr>`;
   }).join('') || `<tr><td colspan="9" class="empty">${T('noEntriesYet')}</td></tr>`;
 }
@@ -4064,6 +4067,19 @@ async function reopenHrSnapshot() {
   try {
     const r = await callApi('reopenAppraisalSnapshot', hrActorParams({ periodLabel, reason }));
     toast('Re-opened ' + r.periodLabel + ' for revision.');
+  } catch (e) { toast(e.message); }
+}
+
+// MANUAL BACKUP (Sep 2026): calls code.gs's HR-only runBackupNow, which
+// itself just calls the same runScheduledBackup() the ~2 AM daily trigger
+// uses - so this button never needs updating separately if the backup
+// logic on the server ever changes. requireHR() on the server is the real
+// gate; hr-edit-only on the button is only so a Manager never sees it.
+async function runBackupNow() {
+  if (!confirm('Take an extra spreadsheet backup right now?')) return;
+  try {
+    const r = await callApi('runBackupNow', hrActorParams({}));
+    toast('Backup created: ' + r.name);
   } catch (e) { toast(e.message); }
 }
 
